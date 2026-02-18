@@ -1,0 +1,2 @@
+# No external dependencies required for core functionality
+# Standard library only: asyncio, struct, logging, os
