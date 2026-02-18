@@ -26,6 +26,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         let (client_socket, _) = listener.accept().await?;
+        if let Err(e) = client_socket.set_nodelay(true) {
+            log::warn!("Failed to set TCP_NODELAY on client socket: {}", e);
+        }
         let pg_addr = pg_addr.clone();
 
         tokio::spawn(async move {
@@ -60,6 +63,10 @@ async fn handle_client(client_socket: TcpStream, pg_addr: String) -> Result<(), 
     log::info!("Real Client IP: {}", client_ip);
 
     let pg_socket = TcpStream::connect(pg_addr).await?;
+    if let Err(e) = pg_socket.set_nodelay(true) {
+        log::warn!("Failed to set TCP_NODELAY on pg socket: {}", e);
+    }
+
     let (mut pg_read_half, pg_write_half) = pg_socket.into_split();
     // Sunucudan gelen veriyi doğrudan aktaracağımız için okuma tarafına BufReader eklememize gerek kalmadı (tokio::io::copy halledecek)
     let mut pg_writer = BufWriter::with_capacity(8192, pg_write_half);
