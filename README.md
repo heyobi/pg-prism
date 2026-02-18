@@ -55,16 +55,25 @@ docker run -d \
   pg-prism
 ```
 
-### Option 2: Systemd Service (Recommended for Linux)
+### Option 2: Rust Core (High Performance - Manual Build)
 
-To ensure PG-Prism runs reliably and restarts automatically on failure or reboot, create a Systemd service.
+For maximum performance, compile the Rust core using Podman/Docker and run it as a standalone binary.
 
-1.  **Move the project**:
+1.  **Compile with Podman/Docker**:
     ```bash
-    sudo mv pg-prism /opt/
+    # Build container
+    podman build -t pg-prism .
+    
+    # Extract binary
+    podman create --name temp-extract pg-prism
+    podman cp temp-extract:/app/rust_core ./pg-prism-rust
+    podman rm temp-extract
+    chmod +x pg-prism-rust
     ```
 
-2.  **Create the service file**:
+2.  **Install & Service**:
+    Move the binary to `/opt/pg-prism/` and configure Systemd.
+
     `sudo nano /etc/systemd/system/pg-prism.service`
 
     ```ini
@@ -78,10 +87,10 @@ To ensure PG-Prism runs reliably and restarts automatically on failure or reboot
     WorkingDirectory=/opt/pg-prism
     
     # Python Core (Default)
-    ExecStart=/usr/bin/python3 core/python/main.py
+    # ExecStart=/usr/bin/python3 core/python/main.py
     
-    # Rust Core (Use instead if compiled)
-    # ExecStart=/opt/pg-prism/target/release/pg-prism-rust
+    # Rust Core (Ultra-Fast 🦀)
+    ExecStart=/opt/pg-prism/pg-prism-rust
 
     Restart=always
     RestartSec=5
@@ -94,6 +103,11 @@ To ensure PG-Prism runs reliably and restarts automatically on failure or reboot
     
     [Install]
     WantedBy=multi-user.target
+    ```
+
+    **Important**: If you are using SELinux (e.g., Fedora/RHEL), ensure the context is correct:
+    ```bash
+    sudo restorecon -Rv /opt/pg-prism
     ```
 
 3.  **Enable and Start**:
