@@ -227,7 +227,7 @@ async def run_iteration(port):
     # Real-world benchmark: we want to measure throughput of established connections usually,
     # or connection establishment. Here we measure QUERY throughput on persistent connections.
     
-    use_proxy = (port == 5002) # Only Rust core (or Python core) behind HAProxy would need this
+    use_proxy = (port == 5003) # Only Rust core (or Python core) behind HAProxy would need this
     
     clients = []
     for _ in range(CONCURRENCY):
@@ -243,7 +243,7 @@ async def run_iteration(port):
     return tps, stats
 
 async def main():
-    ports = [5432, 5002]
+    ports = [5432, 5003]
     results_db = {p: {'tps': [], 'latencies': []} for p in ports}
     
     print(f"{'='*60}")
@@ -292,7 +292,7 @@ async def main():
 
     print(f"{'='*60}")
     
-    rust_tps = statistics.mean(results_db[5002]['tps'])
+    rust_tps = statistics.mean(results_db[5003]['tps'])
     if baseline_tps > 0:
         ratio = (rust_tps / baseline_tps) * 100
         print(f"\nCONCLUSION:")

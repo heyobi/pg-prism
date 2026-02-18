@@ -1,0 +1,11 @@
+rules:
+  - name: "Admin_Full_Access"
+    action: "ALLOW"
+    ips: ["127.0.0.1/32"]
+    users: ["postgres"]
+
+  - name: "Block_Dangerous_Queries"
+    action: "INSPECT"
+    ips: ["0.0.0.0/0"]
+    block_queries: ["DROP", "TRUNCATE"]
+    block_tables: ["secrets"]

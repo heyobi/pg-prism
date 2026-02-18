@@ -8,9 +8,18 @@ const SSL_REQUEST: u32 = 80877103;
 const GSSENC_REQUEST: u32 = 80877104;
 const STARTUP_MESSAGE: u32 = 196608;
 
+mod guardian;
+use guardian::{Guardian, Action, ConnectionContext};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
+    // Initialize Guardian
+    let guardian = Arc::new(Guardian::new("guardian.yaml").unwrap_or_else(|| {
+        log::warn!("Guardian failed to load, proceeding with empty rules (Allow All)");
+        Guardian { rules: vec![] }
+    }));
 
     let listen_host = env::var("LISTEN_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let listen_port = env::var("LISTEN_PORT").unwrap_or_else(|_| "5433".to_string());
@@ -30,16 +39,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             log::warn!("Failed to set TCP_NODELAY on client socket: {}", e);
         }
         let pg_addr = pg_addr.clone();
+        let guardian = guardian.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client_socket, pg_addr).await {
+            if let Err(e) = handle_client(client_socket, pg_addr, guardian).await {
                 log::error!("Connection dropped: {}", e);
             }
         });
     }
 }
 
-async fn handle_client(client_socket: TcpStream, pg_addr: String) -> Result<(), Box<dyn Error>> {
+async fn handle_client(client_socket: TcpStream, pg_addr: String, guardian: Arc<Guardian>) -> Result<(), Box<dyn Error>> {
     let (client_read_half, client_write_half) = client_socket.into_split();
     let mut client_reader = BufReader::with_capacity(8192, client_read_half);
     let mut client_writer = BufWriter::with_capacity(8192, client_write_half);
@@ -70,6 +80,15 @@ async fn handle_client(client_socket: TcpStream, pg_addr: String) -> Result<(), 
     let (mut pg_read_half, pg_write_half) = pg_socket.into_split();
     // Sunucudan gelen veriyi doğrudan aktaracağımız için okuma tarafına BufReader eklememize gerek kalmadı (tokio::io::copy halledecek)
     let mut pg_writer = BufWriter::with_capacity(8192, pg_write_half);
+    
+    // Guardian Context - will be populated after Startup Message
+    // Default to Inspect/Empty until verified
+    let mut guardian_context = ConnectionContext { 
+        action: Action::INSPECT, 
+        block_queries: vec![], 
+        block_tables: vec![] 
+    };
+    let mut context_initialized = false;
 
     // 2. Startup / SSL Negotiation
     loop {
@@ -92,6 +111,20 @@ async fn handle_client(client_socket: TcpStream, pg_addr: String) -> Result<(), 
                     continue;
                 }
                 STARTUP_MESSAGE => {
+                    // Extract User and Database from Startup Message for Guardian
+                    let (user, db) = extract_user_db(&payload);
+                    log::info!("Startup: User='{}', DB='{}'", user, db);
+                    
+                    // GUARDIAN STAGE 1: Connection Check
+                    guardian_context = guardian.check_connection(&client_ip, &user, &db);
+                    
+                    if guardian_context.action == Action::DENY {
+                        log::warn!("Guardian: Connection denied for {} (User: {}, DB: {})", client_ip, user, db);
+                        // Send Error Message to Client would be nice, but closing socket is safer/easier
+                        return Ok(());
+                    }
+                    context_initialized = true;
+
                     log::info!("Startup Message captured. Injecting IP...");
                     let new_payload = inject_ip_startup(&payload, &client_ip);
                     let new_len = (new_payload.len() + 4) as u32;
@@ -117,6 +150,10 @@ async fn handle_client(client_socket: TcpStream, pg_addr: String) -> Result<(), 
 
     // 3. Çift Yönlü Asenkron Trafik (Tam Optimize)
     let client_ip_clone = client_ip.clone();
+    let guardian = guardian.clone(); 
+    // We need to move context into the async block. 
+    // Since it contains Vecs, it might be expensive to clone if large, but usually small.
+    // Arc<T> is better if rules are huge. Here we just move it.
     
     // İstemciden -> Sunucuya (Client to Server)
     let client_to_server = tokio::spawn(async move {
@@ -139,6 +176,18 @@ async fn handle_client(client_socket: TcpStream, pg_addr: String) -> Result<(), 
                 // Eğer kapasite (1024) yeterliyse, OS seviyesinde yeni bellek tahsisi YAPILMAZ.
                 query_buf.resize(payload_len, 0); 
                 if client_reader.read_exact(&mut query_buf).await.is_err() { break; }
+
+                // GUARDIAN STAGE 2: Query Check
+                if context_initialized {
+                     if !Guardian::check_query(&query_buf, &guardian_context) {
+                         // Blocked!
+                         // Send ErrorResponse to client? For now, we just break (close connection) or ignore.
+                         // Properly, we should synthesise an ErrorResponse 'E'.
+                         // Let's just drop connection for security/simplicity.
+                         log::warn!("Guardian: Query blocked.");
+                         break;
+                     }
+                }
 
                 let (modified, new_payload) = if msg_type == b'Q' {
                     process_simple_query(&query_buf, &client_ip_clone)
@@ -289,51 +338,33 @@ fn process_simple_query(payload: &[u8], ip: &str) -> (bool, Vec<u8>) {
 
 // OPTİMİZASYON: String dönüşümleri ve .replace() kaldırıldı. Tamamen Byte Slice üzerinden çalışıyor.
 // GÜVENLİK YAMASI: Extended query için de tırnaklar "application_name" sonrasında aranıyor.
-fn process_extended_query(payload: &[u8], ip: &str) -> (bool, Vec<u8>) {
-    if !contains_ignore_case_ascii(payload, b"set") {
-        return (false, Vec::new());
+// Extracts (user, database) from Startup Message payload
+fn extract_user_db(payload: &[u8]) -> (String, String) {
+    let mut user = String::new();
+    let mut db = String::new();
+
+    let mut params_section = &payload[4..];
+    if let Some((last, rest)) = params_section.split_last() {
+         if *last == 0 { params_section = rest; }
     }
 
-    if let Some(idx1) = payload.iter().position(|&b| b == 0) {
-        let stmt_name_with_null = &payload[..=idx1]; 
-        let rest_after_stmt = &payload[idx1 + 1..];
-
-        if let Some(idx2) = rest_after_stmt.iter().position(|&b| b == 0) {
-            let query_bytes = &rest_after_stmt[..idx2];
-            let rest_of_payload = &rest_after_stmt[idx2..]; 
-            
-            let app_name_bytes = b"application_name";
-            
-            if let Some(app_name_pos) = query_bytes.windows(app_name_bytes.len())
-                                                   .position(|w| w.eq_ignore_ascii_case(app_name_bytes)) {
-                
-                let search_area = &query_bytes[app_name_pos..];
-            
-                if let Some(first_quote_offset) = search_area.iter().position(|&b| b == b'\'') {
-                    if let Some(second_quote_offset) = search_area[first_quote_offset + 1..].iter().position(|&b| b == b'\'') {
-                        
-                        let absolute_first_quote = app_name_pos + first_quote_offset;
-                        let absolute_second_quote = absolute_first_quote + 1 + second_quote_offset;
-                        let value_inside = &query_bytes[absolute_first_quote + 1..absolute_second_quote];
-
-                        let ip_bytes = ip.as_bytes();
-                        if !contains_ascii(value_inside, ip_bytes) {
-                            let ip_suffix = format!(" - {}", ip);
-                            let ip_suffix_bytes = ip_suffix.as_bytes();
-
-                            let mut new_payload = Vec::with_capacity(payload.len() + ip_suffix_bytes.len());
-                            new_payload.extend_from_slice(stmt_name_with_null);
-                            new_payload.extend_from_slice(&query_bytes[..absolute_second_quote]);
-                            new_payload.extend_from_slice(ip_suffix_bytes);
-                            new_payload.extend_from_slice(&query_bytes[absolute_second_quote..]);
-                            new_payload.extend_from_slice(rest_of_payload);
-
-                            return (true, new_payload);
-                        }
-                    }
-                }
-            }
+    let parts: Vec<&[u8]> = params_section.split(|&b| b == 0).collect();
+    let mut i = 0;
+    while i < parts.len() {
+        if i + 1 >= parts.len() { break; }
+        let key = String::from_utf8_lossy(parts[i]);
+        let val = String::from_utf8_lossy(parts[i+1]);
+        
+        if key == "user" {
+            user = val.to_string();
+        } else if key == "database" {
+            db = val.to_string();
         }
+        i += 2;
     }
-    (false, Vec::new())
+    
+    // If db is missing, it usually defaults to user in PG, but here we just return what we found
+    if db.is_empty() { db = user.clone(); }
+
+    (user, db)
 }
