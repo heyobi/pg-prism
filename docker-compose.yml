@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: pg-prism-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=test123
+      - POSTGRES_DB=postgres
+    networks:
+      - pg-network
+
+  pg-prism:
+    build: .
+    container_name: pg-prism-sidecar
+    environment:
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - LISTEN_PORT=5433
+      - CORE_TYPE=rust
+    ports:
+      - "5433:5433"
+    volumes:
+      - ./core/rust/guardian.yaml:/app/guardian.yaml:ro
+    depends_on:
+      - postgres
+    networks:
+      - pg-network
+
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: pg-prism-haproxy
+    ports:
+      - "5434:5434"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - pg-prism
+    networks:
+      - pg-network
+
+networks:
+  pg-network:
+    driver: bridge

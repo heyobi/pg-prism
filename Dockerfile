@@ -1,5 +1,5 @@
 # Builder Stage for Rust
-FROM rust:1.80-slim as builder
+FROM rust:1.85-slim as builder
 WORKDIR /app
 COPY core/rust .
 RUN cargo build --release

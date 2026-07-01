@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::str::FromStr;
-use std::sync::Arc;
 use serde::Deserialize;
 use cidr::IpCidr;
 use chrono::{Local, Timelike};
@@ -34,7 +33,7 @@ pub enum Action {
 }
 
 pub struct Guardian {
-    rules: Vec<Rule>,
+    pub rules: Vec<Rule>,
 }
 
 pub struct ConnectionContext {

@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -150,7 +151,6 @@ async fn handle_client(client_socket: TcpStream, pg_addr: String, guardian: Arc<
 
     // 3. Çift Yönlü Asenkron Trafik (Tam Optimize)
     let client_ip_clone = client_ip.clone();
-    let guardian = guardian.clone(); 
     // We need to move context into the async block. 
     // Since it contains Vecs, it might be expensive to clone if large, but usually small.
     // Arc<T> is better if rules are huge. Here we just move it.
@@ -338,6 +338,53 @@ fn process_simple_query(payload: &[u8], ip: &str) -> (bool, Vec<u8>) {
 
 // OPTİMİZASYON: String dönüşümleri ve .replace() kaldırıldı. Tamamen Byte Slice üzerinden çalışıyor.
 // GÜVENLİK YAMASI: Extended query için de tırnaklar "application_name" sonrasında aranıyor.
+fn process_extended_query(payload: &[u8], ip: &str) -> (bool, Vec<u8>) {
+    if let Some(idx1) = payload.iter().position(|&b| b == 0) {
+        if let Some(offset2) = payload[idx1 + 1..].iter().position(|&b| b == 0) {
+            let idx2 = idx1 + 1 + offset2;
+            let query_bytes = &payload[idx1 + 1..idx2];
+            
+            if !contains_ignore_case_ascii(query_bytes, b"set") {
+                return (false, Vec::new());
+            }
+
+            let app_name_bytes = b"application_name";
+            if let Some(app_name_pos) = query_bytes.windows(app_name_bytes.len())
+                                                   .position(|w| w.eq_ignore_ascii_case(app_name_bytes)) {
+                let search_area = &query_bytes[app_name_pos..];
+                if let Some(first_quote_offset) = search_area.iter().position(|&b| b == b'\'') {
+                    if let Some(second_quote_offset) = search_area[first_quote_offset + 1..].iter().position(|&b| b == b'\'') {
+                        let absolute_first_quote = app_name_pos + first_quote_offset;
+                        let absolute_second_quote = absolute_first_quote + 1 + second_quote_offset;
+                        
+                        let value_inside = &query_bytes[absolute_first_quote + 1..absolute_second_quote];
+                        let ip_bytes = ip.as_bytes();
+
+                        if !contains_ascii(value_inside, ip_bytes) {
+                            let ip_suffix = format!(" - {}", ip);
+                            let ip_suffix_bytes = ip_suffix.as_bytes();
+
+                            let mut new_query = Vec::with_capacity(query_bytes.len() + ip_suffix_bytes.len());
+                            new_query.extend_from_slice(&query_bytes[..absolute_second_quote]);
+                            new_query.extend_from_slice(ip_suffix_bytes);
+                            new_query.extend_from_slice(&query_bytes[absolute_second_quote..]);
+
+                            let mut new_payload = Vec::with_capacity(payload.len() + ip_suffix_bytes.len());
+                            new_payload.extend_from_slice(&payload[..idx1 + 1]);
+                            new_payload.extend_from_slice(&new_query);
+                            new_payload.push(0);
+                            new_payload.extend_from_slice(&payload[idx2 + 1..]);
+
+                            return (true, new_payload);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (false, Vec::new())
+}
+
 // Extracts (user, database) from Startup Message payload
 fn extract_user_db(payload: &[u8]) -> (String, String) {
     let mut user = String::new();
