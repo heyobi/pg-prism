@@ -2,13 +2,58 @@ import asyncio
 import struct
 import logging
 import os
+import ssl
 
 # --- AYARLAR ---
 LISTEN_HOST = '0.0.0.0'
 LISTEN_PORT = 5433        # HAProxy trafiği buraya yönlendirecek
 PG_HOST = os.environ.get('PG_HOST', 'localhost')     # Gerçek Postgres veya PgBouncer IP'si
 PG_PORT = int(os.environ.get('PG_PORT', 5432))            # Gerçek Postgres veya PgBouncer Portu
+
+# SSL Ayarları
+SSL_ENABLED = os.environ.get('SSL_ENABLED', 'true').lower() in ('true', '1', 'yes')
+SSL_CERT_PATH = os.environ.get('SSL_CERT_PATH', '/app/server.crt')
+SSL_KEY_PATH = os.environ.get('SSL_KEY_PATH', '/app/server.key')
 # ---------------
+
+SSL_CONTEXT = None
+
+def generate_self_signed_cert():
+    if not SSL_ENABLED:
+        return
+    if not os.path.exists(SSL_CERT_PATH) or not os.path.exists(SSL_KEY_PATH):
+        logging.info("SSL sertifikası bulunamadı. Kendinden imzalı sertifika üretiliyor...")
+        import subprocess
+        try:
+            os.makedirs(os.path.dirname(SSL_CERT_PATH), exist_ok=True)
+            os.makedirs(os.path.dirname(SSL_KEY_PATH), exist_ok=True)
+            subprocess.run([
+                'openssl', 'req', '-new', '-newkey', 'rsa:2048', '-days', '365',
+                '-nodes', '-x509', '-keyout', SSL_KEY_PATH, '-out', SSL_CERT_PATH,
+                '-subj', '/CN=localhost'
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logging.info("Kendinden imzalı SSL sertifikası başarıyla üretildi.")
+        except Exception as e:
+            logging.error(f"SSL sertifikası üretilirken hata oluştu: {e}")
+
+def init_ssl_context():
+    global SSL_CONTEXT
+    if not SSL_ENABLED:
+        logging.info("SSL devre dışı bırakıldı.")
+        return
+    
+    generate_self_signed_cert()
+    
+    if os.path.exists(SSL_CERT_PATH) and os.path.exists(SSL_KEY_PATH):
+        try:
+            SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            SSL_CONTEXT.load_cert_chain(certfile=SSL_CERT_PATH, keyfile=SSL_KEY_PATH)
+            logging.info("SSL sertifikaları başarıyla yüklendi. SSL desteği aktif.")
+        except Exception as e:
+            logging.error(f"SSL context başlatılırken hata: {e}")
+            SSL_CONTEXT = None
+    else:
+        logging.warning("SSL sertifikaları bulunamadığı için SSL desteği pasif.")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -186,10 +231,22 @@ async def handle_client(client_reader, client_writer):
 
                 # SSLRequest (80877103) kontrolü
                 if protocol == 80877103:
-                    logging.info("SSLRequest (80877103) alındı. 'N' gönderilerek reddediliyor.")
-                    client_writer.write(b'N')
-                    await client_writer.drain()
-                    continue
+                    if SSL_CONTEXT is not None:
+                        logging.info("SSLRequest (80877103) alındı. 'S' gönderilerek SSL el sıkışması başlatılıyor.")
+                        client_writer.write(b'S')
+                        await client_writer.drain()
+                        try:
+                            await client_writer.start_tls(SSL_CONTEXT)
+                            logging.info("Client ile SSL el sıkışması başarılı.")
+                            continue
+                        except Exception as ssl_err:
+                            logging.error(f"Client SSL el sıkışma hatası: {ssl_err}")
+                            return
+                    else:
+                        logging.info("SSLRequest (80877103) alındı. SSL pasif olduğundan 'N' gönderilerek reddediliyor.")
+                        client_writer.write(b'N')
+                        await client_writer.drain()
+                        continue
 
                 # GSSENCRequest (80877104) kontrolü
                 if protocol == 80877104:
@@ -275,6 +332,7 @@ async def handle_client(client_reader, client_writer):
             except: pass
 
 async def main():
+    init_ssl_context()
     server = await asyncio.start_server(handle_client, LISTEN_HOST, LISTEN_PORT)
     logging.info(f"Microproxy çalışıyor: {LISTEN_HOST}:{LISTEN_PORT}")
     logging.info(f"Trafik şuraya yönlendirilecek: {PG_HOST}:{PG_PORT}")

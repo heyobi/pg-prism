@@ -38,7 +38,7 @@ RUN echo '#!/bin/bash\n\
     fi' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Run as non-root user
-RUN useradd -m appuser
+RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 CMD ["/app/entrypoint.sh"]
