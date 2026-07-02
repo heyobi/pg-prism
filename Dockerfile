@@ -1,5 +1,6 @@
 # Builder Stage for Rust
 FROM rust:1.85-slim as builder
+RUN apt-get update && apt-get install -y pkg-config libssl-dev openssl
 WORKDIR /app
 COPY core/rust .
 RUN cargo build --release
