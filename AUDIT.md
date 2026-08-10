@@ -736,6 +736,78 @@ Roughly seven weeks to the slide deadline. The binding constraint is not the cod
 
 ---
 
+## 14. The silent-acceptance pass
+
+Three findings that arrived independently turned out to be one bug wearing three
+faces:
+
+- **#2** — a `CancelRequest` was not recognised as a distinct startup code, so it
+  fell through to the startup rewriter and was corrupted. Cancellation did not
+  work, and nothing reported a failure.
+- **#52** — a non-ASCII `application_name` was not recognised as costing more
+  than its byte length, so the injected address was truncated away by the server.
+  `pg_stat_activity` still showed a plausible value.
+- **#22** — protocol 3.2 was not recognised as a startup message, so Guardian was
+  skipped entirely. Injection kept working, so the view looked *more* trustworthy
+  than a working deny would have.
+
+The shape: **the code did not recognise something, did nothing about it, and the
+result still looked plausible.** In all three cases the observable outcome was
+indistinguishable from success. That is the failure mode this section exists to
+enumerate, because it is the one the project keeps producing and the one an
+operator cannot detect from the outside.
+
+This pass walked every branch where an unrecognised, malformed, or out-of-range
+input leads to "carry on" rather than to an error or a refusal. Nothing was
+fixed. Where reading the code was not enough to decide, a test was written; those
+are in `core/rust/tests/silent_acceptance.rs`, and each one **asserts the current
+wrong behaviour on purpose** so that a later fix flips the test rather than
+passing unnoticed.
+
+### 14.1 Candidates — the same class of bug
+
+| # | Location | What is not recognised | What happens instead | Evidence |
+|---|---|---|---|---|
+| **53** | `guardian.rs:15-25` (`Rule`, no `deny_unknown_fields`) | A misspelled rule field, e.g. `block_querys` for `block_queries` | The field is dropped. The rule loads, is counted in `Guardian loaded with 1 rules`, matches connections, and blocks nothing. | **Observed** |
+| **54** | `guardian.rs:201-206` (`.unwrap_or(false)`) | One unparseable CIDR among several in a rule's `ips` | The entry silently matches no address. On a DENY rule, everything behind it is no longer denied. `warn_about_unreachable_rules` misses it: it warns only when *every* entry fails. | **Observed** |
+| **55** | `guardian.rs:54-68` (`time_in_range`) | A malformed `time_range`, e.g. `10pm-6am` | Returns false, so the rule never matches. The comment calls this "the safer direction to fail" — true for ALLOW, false for DENY, where a rule that never matches is a rule that never denies. | **Observed** |
+| **56** | `main.rs:42-45` | Any spelling of yes other than `true`: `1`, `yes`, `on`, or `true` with a stray space | TLS is silently off, and the only log line is `SSL termination is disabled.` Note the asymmetry with `Limits::from_env`, which refuses to start on a malformed value. | **Observed** |
+| **57** | `main.rs:52-56` | `load_tls_acceptor()` failing when `SSL_ENABLED=true` | Logs an error and serves **plaintext anyway**. The operator explicitly asked for TLS and the process starts without it. A client using `sslmode=require` will refuse, but one using `prefer` — libpq's default — connects in clear. | **Inspected** |
+| **58** | `guardian.rs:262-268` | A ruleset where no rule matches the connection | Falls through to `INSPECT` with empty block lists, which is allow-everything, and is not logged. Combined with #53 and #54, a ruleset can be entirely inert while every startup line looks normal. | **Inspected** |
+| 23 | `proxy.rs:365` | That a blocked `P` (Parse) leaves the extended protocol mid-sequence | `continue` keeps the connection open; the following Bind/Execute reach a backend that never saw the Parse. Previously logged as #23. | Predicted |
+| 25 | `proxy.rs:386-404` | A read or write failure inside the blind-forward chunk loop | The `break` exits only the inner loop. Control falls to `flush` and the outer loop reads the next byte as a message type, mid-message. Previously logged as #25. | Predicted |
+| 31 | `protocol.rs:128-187` | `options` carrying `-c application_name=...` | Copied verbatim alongside the injected parameter. Which wins is not established. Previously logged as #31. | Predicted |
+| 38 | `proxy.rs:362` | Whether the client was inside a transaction when a query was blocked | The synthesised `ReadyForQuery` always reports `I` (idle). A client in a failed transaction is told it is idle. Previously logged as #38. | Predicted |
+
+### 14.2 Deliberate and safe
+
+Listed so the distinction is on the record, not to pad the count.
+
+| Location | Unrecognised input | Why carrying on is right |
+|---|---|---|
+| `proxy.rs:540-543` | Any startup code that is not SSL/GSSENC/Cancel | Falls through to the session path, which then checks `is_supported_startup` at `:242` and refuses anything that is not 3.x. Correct **only because of that check** — this arm is what #22 hid behind, and the coupling is now the load-bearing part. |
+| `proxy.rs:518-525` | `SSLRequest` while TLS is off | Replying `N` is what the protocol specifies. The client decides; `sslmode=require` fails loudly at the client. |
+| `proxy.rs:337` | An unknown frontend message type byte | Forwarded with its length. The proxy has no business enumerating message types, and PostgreSQL rejects what it does not know. |
+| `guardian.rs:96` (`ConfigError::Invalid`) | A ruleset that is not valid YAML, or a bad `action:` | Fatal. This is the shape done right, and the contrast that makes #53 indefensible: strict about the container, lenient about the contents. |
+| `trust.rs:82-86` | A malformed entry in `TRUSTED_PROXIES` | Fatal. Also the right answer, and the direct contradiction of #54 — two allowlists in one binary failing in opposite directions. |
+| `proxy.rs:93-95`, `:114-116` | A socket option that will not set | Warned and carried on. Losing `TCP_NODELAY` or keepalive degrades the connection; it does not make it wrong. Note that this does silently disable the #19 leak mitigation. |
+| `protocol.rs:158-161` | A startup parameter with an empty key | Skipped. Not representable in libpq and rejected by the server anyway. |
+| `proxy.rs:350` | A `Q`/`P` message of 1 KB or more | Forwarded uninspected. Finding #7: known, documented, and the reason Guardian is a guard rail. |
+
+### 14.3 What this says for the talk
+
+The three original bugs were found in three different ways — by a protocol
+checklist, by a real server in CI, and by one line in the release notes for
+PostgreSQL 18. None was found by the fake backend, because a backend you write
+yourself agrees with you about what is worth recognising.
+
+The pattern generalises past this project: **a proxy is a place where
+unrecognised input is cheapest to ignore and most expensive to have ignored.**
+Every one of these branches was written by someone who knew what the recognised
+case looked like and had no reason to think about the rest.
+
+---
+
 ## Remediation status
 
 Updated as work proceeds. Hashes refer to the rewritten history (see A1); every
@@ -849,8 +921,16 @@ quoted on a conference slide.
 | 48 | **Inspected** | `.gitignore` contents. |
 | 49 | **Inspected** | `Dockerfile:25` trailing whitespace. |
 | 50 | **Inspected** | `docker-compose.yml:11` literal. |
+| 53 | **Observed** | `silent_acceptance.rs::a_misspelled_rule_field_is_silently_ignored`: rule loads, `block_queries` empty, `DROP TABLE secrets` passes. |
+| 54 | **Observed** | `silent_acceptance.rs::one_unparseable_cidr_silently_removes_addresses_from_a_deny_rule`: `10.1.2.3` → DENY, `192.168.1.50` → INSPECT. |
+| 55 | **Observed** | `silent_acceptance.rs::a_malformed_time_range_silently_disables_a_deny_rule`: a DENY rule with `10pm-6am` returns INSPECT. |
+| 56 | **Observed** | `silent_acceptance.rs::ssl_enabled_accepts_only_one_spelling_of_yes`: `1`, `yes`, `on`, `" true"`, `"true "` all yield plaintext. |
+| 57 | **Inspected** | `main.rs:52-56`: the `Err` arm logs and binds `None`, and the listener starts regardless. |
+| 58 | **Inspected** | `guardian.rs:262-268`: the fall-through returns `Action::INSPECT` with empty block lists and emits no log line. |
 
-**16 Observed, 19 Inspected, 15 Predicted.** The Predicted ones marked *Needs a test* are queued into A6 and A4.
+**20 Observed, 21 Inspected, 15 Predicted.** The Predicted ones marked *Needs a
+test* are queued into A6 and A4. Findings 53–58 come from the silent-acceptance
+pass (§14) and are **not fixed**; their tests assert the defective behaviour.
 
 ---
 
@@ -910,6 +990,12 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 48 | **S4** | **Inspected** | `.gitignore` does not exclude generated `*.key`/`*.crt`/`*.p12` | `.gitignore:1-8` | 5 m |
 | 49 | **S4** | **Inspected** | `ENV CORE_TYPE=python  ` trailing whitespace before a stray comment line | `Dockerfile:25-26` | 5 m |
 | 50 | **S4** | **Inspected** | Hardcoded `POSTGRES_PASSWORD=test123` in the compose file | `docker-compose.yml:11` | 10 m |
+| 53 | **S1** | **Observed** | A misspelled Guardian rule field is silently dropped; the rule loads, is counted in the log, and blocks nothing | `guardian.rs:15-25` | 30 m |
+| 54 | **S2** | **Observed** | One unparseable CIDR in a rule's `ips` is silently skipped; a DENY stops applying to those addresses | `guardian.rs:201-206`, `:146-176` | 1 h |
+| 55 | **S2** | **Observed** | A malformed `time_range` makes a DENY rule never match, at any hour | `guardian.rs:54-68` | 1 h |
+| 56 | **S2** | **Observed** | `SSL_ENABLED` accepts only `true`; `1`, `yes`, `on`, or a stray space silently disable TLS | `main.rs:42-45` | 30 m |
+| 57 | **S2** | **Inspected** | TLS initialisation failure under `SSL_ENABLED=true` logs an error and serves plaintext anyway | `main.rs:52-56` | 30 m |
+| 58 | **S3** | **Inspected** | A ruleset matching no rule falls through to allow-everything, unlogged | `guardian.rs:262-268` | 1 h |
 
 **Totals:** 12 × S1, 15 × S2, 16 × S3, 7 × S4. Tier 1 of §13 clears eleven of the twelve S1 findings in about five days; the twelfth (tests and CI) is the two-and-a-half-day Tier 2 item.
 
