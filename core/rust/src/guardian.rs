@@ -124,7 +124,7 @@ impl Guardian {
                 if parts.len() == 2 {
                     let start = parts[0];
                     let end = parts[1];
-                    if current_time_str < start.to_string() || current_time_str > end.to_string() {
+                    if current_time_str.as_str() < start || current_time_str.as_str() > end {
                         continue;
                     }
                 }

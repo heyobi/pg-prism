@@ -213,12 +213,7 @@ pub async fn handle_client(
         let mut transfer_buf = vec![0u8; 8192];
         let mut query_buf = Vec::with_capacity(1024);
 
-        loop {
-            let msg_type = match client_reader.read_u8().await {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-
+        while let Ok(msg_type) = client_reader.read_u8().await {
             let mut len_bytes = [0u8; 4];
             if client_reader.read_exact(&mut len_bytes).await.is_err() {
                 break;
@@ -233,18 +228,16 @@ pub async fn handle_client(
                 }
 
                 // GUARDIAN STAGE 2: Query Check
-                if context_initialized {
-                    if !Guardian::check_query(&query_buf, &guardian_context) {
-                        log::warn!("Guardian: Query blocked.");
-                        let err_packet =
-                            make_error_response("Query blocked by PG-Prism Guardian", "42501");
-                        let mut guard = client_write_half_clone.lock().await;
-                        if guard.write_all(&err_packet).await.is_ok() {
-                            let _ = guard.write_all(b"Z\x00\x00\x00\x05I").await;
-                            let _ = guard.flush().await;
-                        }
-                        continue; // keep connection open
+                if context_initialized && !Guardian::check_query(&query_buf, &guardian_context) {
+                    log::warn!("Guardian: Query blocked.");
+                    let err_packet =
+                        make_error_response("Query blocked by PG-Prism Guardian", "42501");
+                    let mut guard = client_write_half_clone.lock().await;
+                    if guard.write_all(&err_packet).await.is_ok() {
+                        let _ = guard.write_all(b"Z\x00\x00\x00\x05I").await;
+                        let _ = guard.flush().await;
                     }
+                    continue; // keep connection open
                 }
 
                 let (modified, new_payload) = if msg_type == b'Q' {
