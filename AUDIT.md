@@ -313,10 +313,19 @@ DROP TABLE secrets; --<1000 spaces>
 
 ```sql
 -- input, a perfectly ordinary query:
-SELECT * FROM pg_settings WHERE name = 'application_name' AND setting = 'x';
--- what PostgreSQL receives:
-SELECT * FROM pg_settings WHERE name = 'application_name AND setting =  - 10.0.0.5x';
+SELECT * FROM pg_settings WHERE name = 'application_name' AND setting = 'x'
+-- what PostgreSQL actually received (observed, not predicted):
+SELECT * FROM pg_settings WHERE name = 'application_name' AND setting =  - 203.0.113.99'x'
+
+-- and for set_config, a straight syntax error:
+SELECT set_config('application_name', 'reporting', false)
+SELECT set_config('application_name',  - 203.0.113.99'reporting', false)
 ```
+
+*(The exact mangling above is corrected from the original audit, which predicted
+the shape of the corruption from reading the code. The strings here are what
+`tests/query_passthrough.rs` captured at the backend before the rewriter was
+deleted. The conclusion is unchanged.)*
 The first quote found after `application_name` is its own **closing** quote. Same failure for `SELECT set_config('application_name','v',false)`, which becomes a syntax error. Any application that reads its own GUCs, logs a query containing the word, or stores it in a table is broken by the proxy. `process_extended_query` (`:505-550`) has the identical flaw.
 
 This is a **data-plane correctness bug**, not just a security one, and it is the sort of thing that shows up as a mystery outage three weeks after deployment.
@@ -733,6 +742,11 @@ hash from before the rewrite is dead.
 | Finding | Status | Commit | Note |
 |---|---|---|---|
 | 1 — PROXY header trusted from any peer; client IP and Guardian IP rules spoofable | **fixed** | `11377ff` | New `TRUSTED_PROXIES` allowlist checked against the real TCP peer before the header is parsed; loopback-only default; fails closed on a malformed list and refuses to start. Reproduced first: `tests/trusted_proxy.rs` originally asserted that a forged header from an arbitrary peer was honoured, and passed. |
+| 3 — the `SET` rewriter corrupts legitimate SQL | **fixed** | `6e69b30` | Deleted, not repaired. Reproduced first: `tests/query_passthrough.rs` captured the mangled statements at the backend. The audit's predicted example was wrong in detail and is corrected in §5.3. |
+| 16 — `RESET` and dollar quoting bypass the interception | **removed** | `6e69b30` | The interception is gone, so the bypasses are moot. The limitation they pointed at (a client can always overwrite `application_name`) is now stated plainly and asserted by a test. |
+| 44 — `bytes` dependency declared and unused | **fixed** | `36e29a3` | |
+| 51b — no CI | **fixed** | `717b9aa` | fmt, clippy `-D warnings`, hermetic tests, real-PostgreSQL tests against a `postgres:16` service, and a Docker build. `cargo audit` runs weekly in its own workflow. |
+| 10 — zero tests | **fixed** | `717b9aa`, and the suites added in A2/A3/A5 | 48 tests run locally (33 unit, 15 integration against the fake backend) plus 9 end-to-end tests against a real PostgreSQL in CI. |
 | 4 — UTF-8 boundary panic in the 63-byte truncation | **fixed** | `13ff293` | Truncation steps back to the nearest char boundary. Reproduced first by sweeping suffix lengths across every alignment. |
 | 5 — out-of-bounds panic on a 4-byte startup packet | **fixed** | `13ff293` | Guarded in `inject_ip_startup` and `extract_user_db`, and the caller now rejects the packet before either is reached. |
 | 8 — `accept()` error terminates the process | **fixed** | `13ff293` | Logs and retries with exponential backoff capped at 1s. |
