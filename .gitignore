@@ -1,3 +1,23 @@
+# Rust build artifacts
+target/
+
+# Generated TLS material — the proxy mints a self-signed cert at startup when
+# none is present. None of this belongs in version control.
+*.p12
+*.crt
+*.key
+*.pem
+
+# Notebooks: committed outputs leak environment details and stale benchmark
+# numbers. Benchmarks live in bench/ and write BENCHMARK.md.
+*.ipynb
+
+# Runtime logs
+*.log
+prism.log
+haproxy.log
+
+# Python
 __pycache__/
 *.py[cod]
 *.so
@@ -5,4 +25,3 @@ __pycache__/
 .venv
 env/
 venv/
-*.log
