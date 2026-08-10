@@ -31,39 +31,58 @@ pub fn make_error_response(message: &str, code: &str) -> Vec<u8> {
 /// PostgreSQL's NAMEDATALEN limit for `application_name`, in **bytes**.
 pub const NAMEDATALEN_LIMIT: usize = 63;
 
-/// Truncates to at most `max_bytes`, stepping back to the nearest character
-/// boundary.
+/// How many characters PostgreSQL will store for one byte of `application_name`.
 ///
-/// The limit is a byte count but `&str[..n]` panics unless `n` lands on a
-/// character boundary, so a byte limit and a UTF-8 string cannot be combined
-/// naively. Stepping back can drop at most three bytes.
-fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
+/// `application_name` is ASCII-only. PostgreSQL runs the value through
+/// `pg_clean_ascii()`, which since version 14 replaces every byte outside
+/// printable ASCII with a four-character `\xNN` escape, and only then applies
+/// NAMEDATALEN. So a two-byte `ç` does not cost two of our sixty-three
+/// characters, it costs eight.
+///
+/// Budgeting in raw bytes and letting the server expand afterwards is how the
+/// injected address used to be truncated away entirely.
+fn stored_len(byte: u8) -> usize {
+    if (0x20..0x7f).contains(&byte) {
+        1
+    } else {
+        4
     }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+}
+
+fn stored_len_of(s: &str) -> usize {
+    s.bytes().map(stored_len).sum()
+}
+
+/// Truncates `s` so that PostgreSQL will store at most `budget` characters,
+/// cutting only on character boundaries.
+fn truncate_to_stored_budget(s: &str, budget: usize) -> &str {
+    let mut used = 0;
+    let mut end = 0;
+    for (idx, ch) in s.char_indices() {
+        let cost = stored_len_of(&s[idx..idx + ch.len_utf8()]);
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        end = idx + ch.len_utf8();
     }
     &s[..end]
 }
 
 pub fn format_application_name(original_name: &str, app_ip: &str) -> String {
+    // The suffix is an address literal plus " - ", so it is printable ASCII and
+    // its stored length equals its byte length.
     let suffix = format!(" - {}", app_ip);
 
-    if original_name.len() + suffix.len() <= NAMEDATALEN_LIMIT {
-        return format!("{}{}", original_name, suffix);
-    }
-
     // Unreachable with real addresses: the longest IPv6 literal is 45
-    // characters, so the suffix tops out at 48 bytes. The guard costs nothing
-    // and the alternative, if the address source ever changes, is a panic.
+    // characters, so the suffix tops out at 48. The guard costs nothing and the
+    // alternative, if the address source ever changes, is a panic.
     if suffix.len() >= NAMEDATALEN_LIMIT {
-        return truncate_on_char_boundary(&suffix, NAMEDATALEN_LIMIT).to_string();
+        return truncate_to_stored_budget(&suffix, NAMEDATALEN_LIMIT).to_string();
     }
 
-    let available = NAMEDATALEN_LIMIT - suffix.len();
-    let truncated = truncate_on_char_boundary(original_name, available);
+    let budget = NAMEDATALEN_LIMIT - suffix.len();
+    let truncated = truncate_to_stored_budget(original_name, budget);
     format!("{}{}", truncated, suffix)
 }
 
@@ -192,6 +211,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// AUDIT.md finding #52, found by the real-PostgreSQL suite in CI and not
+    /// reproducible against the fake backend, which stores whatever it is sent.
+    ///
+    /// PostgreSQL expands every non-ASCII byte of application_name to a
+    /// four-character `\xNN` escape before applying NAMEDATALEN. Budgeting in
+    /// raw bytes meant a multi-byte name expanded past 63 on the server and the
+    /// injected address was cut off entirely, so the one thing the proxy exists
+    /// to do silently did not happen.
+    #[test]
+    fn the_address_survives_a_multibyte_name_after_server_side_escaping() {
+        for ch in ["é", "ğ", "ş", "→", "🔥"] {
+            for reps in [1, 5, 12, 40, 100] {
+                let name = ch.repeat(reps);
+                let out = format_application_name(&name, "203.0.113.99");
+                assert!(
+                    out.ends_with(" - 203.0.113.99"),
+                    "{:?}x{} lost the address: {:?}",
+                    ch,
+                    reps,
+                    out
+                );
+                assert!(
+                    stored_len_of(&out) <= 63,
+                    "{:?}x{} stores as {} characters: {:?}",
+                    ch,
+                    reps,
+                    stored_len_of(&out),
+                    out
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_length_counts_escapes_not_bytes() {
+        assert_eq!(stored_len_of("abc"), 3);
+        assert_eq!(stored_len_of("ç"), 8, "two bytes, each escaped to four");
+        assert_eq!(stored_len_of("🔥"), 16, "four bytes, each escaped to four");
+        // Control characters are escaped too, even though they are one byte.
+        assert_eq!(stored_len_of("\n"), 4);
     }
 
     #[test]

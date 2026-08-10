@@ -194,25 +194,40 @@ async fn absent_application_name_is_added() {
     );
 }
 
-/// A multi-byte application_name at the length limit. This is the path that
-/// panicked before A3; here it is proven end to end, including that PostgreSQL
-/// accepts the truncated value rather than rejecting the startup packet.
+/// A multi-byte application_name at the length limit.
+///
+/// This is the path that panicked before A3, and the one that exposed finding
+/// #52. PostgreSQL stores application_name as ASCII: `pg_clean_ascii()` expands
+/// every non-ASCII byte into a four-character `\xNN` escape, and NAMEDATALEN is
+/// applied to *that*. So a name budgeted in raw bytes overflows on the server
+/// and the injected address is cut off, which is the one outcome that makes the
+/// proxy pointless.
+///
+/// The fake backend cannot catch this: it stores whatever it is handed.
 #[tokio::test]
 #[ignore = "needs a PostgreSQL server; CI runs this with --include-ignored"]
-async fn multibyte_application_name_survives_truncation() {
+async fn multibyte_application_name_keeps_the_address_after_server_escaping() {
     let proxy = start_proxy(false).await;
-    let long_name = "çalışan".repeat(12); // well past 63 bytes, 2-byte characters
+    let long_name = "çalışan".repeat(12); // 120 bytes, expands to 480 escaped
     let client = connect_plain(proxy, &long_name).await;
 
     let seen = own_application_name(&client).await;
     assert!(
         seen.len() <= 63,
-        "PostgreSQL reported {} bytes, over NAMEDATALEN",
-        seen.len()
+        "PostgreSQL reported {} characters, over NAMEDATALEN: {:?}",
+        seen.len(),
+        seen
     );
     assert!(
         seen.ends_with(FORGED_CLIENT_IP),
-        "the address was truncated away: {:?}",
+        "the address was truncated away by server-side escaping: {:?}",
+        seen
+    );
+    assert!(
+        seen.contains("\\x"),
+        "expected PostgreSQL to escape the non-ASCII name; if this ever stops \
+         being true the byte budget in format_application_name is too \
+         conservative and should be revisited. Got {:?}",
         seen
     );
 }
