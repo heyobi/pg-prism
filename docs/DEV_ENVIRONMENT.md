@@ -50,16 +50,23 @@ PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=secret \
 
 ### Disk budget
 
+Measured on Ubuntu 26.04 under WSL2, not estimated:
+
 | Item | Size |
 | :--- | :--- |
-| WSL2 kernel + Ubuntu | ~1.2 GB |
-| `postgresql` + `postgresql-client` | ~180 MB |
+| Rust toolchain (`~/.rustup` + `~/.cargo`) | 693 MB |
+| `target/` after debug + release + test builds | **1.1 GB** |
+| `postgresql` 18 + client + contrib | ~46 MB installed |
 | `haproxy` | ~5 MB |
-| Rust toolchain (if not already in WSL) | ~1.3 GB |
-| `target/` after a release build | ~400 MB |
+| Ubuntu base and the rest of apt | ~1.2 GB |
 
-**Budget 3.5 GB**, or ~2.2 GB if you build on Windows and only run the stack in
-WSL. Compare with section 6: the container path needs about 8 GB.
+**Budget 4 GB.** The earlier estimate of 400 MB for `target/` was wrong by
+almost 3x once the test binaries and both profiles are present; `cargo clean`
+reclaims all of it. Compare with section 6: the container path needs about
+8 GB.
+
+Note that the WSL virtual disk grows to fit and does not shrink when files are
+deleted, so the number that matters is the peak, not the current usage.
 
 ### Install WSL2
 
@@ -87,7 +94,8 @@ Everything below runs **inside WSL**.
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y postgresql postgresql-client haproxy build-essential pkg-config libssl-dev
+sudo apt-get install -y postgresql postgresql-client postgresql-contrib \
+                        haproxy build-essential pkg-config libssl-dev git curl
 
 # Rust, if it is not already there
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -95,15 +103,50 @@ source "$HOME/.cargo/env"
 ```
 
 `libssl-dev` and `pkg-config` are needed because `native-tls` links OpenSSL on
-Linux.
+Linux. `postgresql-contrib` is where `pgbench` lives.
+
+**Which PostgreSQL you get depends on the distribution.** Ubuntu 26.04 ships
+**18.3**; CI runs `postgres:16`. Check yours and write it down, because the
+benchmark slide has to state the version:
+
+```bash
+psql --version
+```
+
+Installing `haproxy` also registers a system service that starts on boot. Its
+default configuration defines no frontend, so it binds nothing and does not
+collide with the one `smoke-native.sh` starts. Leave it alone or
+`sudo systemctl disable --now haproxy` if the idle process bothers you.
 
 ### Start PostgreSQL
 
-WSL images often ship without systemd, so use the `service` wrapper:
+Check first, because this differs between WSL images:
+
+```bash
+systemctl is-system-running        # "running" or "degraded" means systemd is on
+```
+
+On Ubuntu 26.04 systemd is enabled by default, the cluster starts on boot, and
+nothing further is needed. Verify:
+
+```bash
+pg_lsclusters                      # Status should be "online"
+pg_isready -h 127.0.0.1 -p 5432
+```
+
+If `systemctl` reports that the system has not been booted with systemd, add
+this to `/etc/wsl.conf`, then run `wsl --shutdown` **from Windows** and reopen
+the shell:
+
+```ini
+[boot]
+systemd=true
+```
+
+Without systemd, start the cluster by hand each session:
 
 ```bash
 sudo service postgresql start
-pg_isready -h 127.0.0.1 -p 5432
 ```
 
 If `pg_isready` reports no connection, PostgreSQL may be listening only on its
@@ -133,6 +176,10 @@ builds the proxy, starts PG-Prism on 6433 and HAProxy on 6434, sends one
 connection along the full path, prints the `pg_stat_activity` row, and stops
 what it started. `KEEP=1 ./scripts/smoke-native.sh` leaves the proxy and HAProxy
 running so you can poke at them.
+
+**The first run asks for a sudo password**, once, to create the role. Later runs
+detect that the role already works and skip it entirely, so a rehearsal never
+stops for a prompt.
 
 A pass looks like:
 
@@ -237,13 +284,26 @@ Option 1 needs no network and no second machine, so it is the one to rehearse.
 Do this at least a week before, not the night before.
 
 ```bash
-# Build the release binary now so the demo never compiles on stage
+# Build the release binary now so the demo never compiles on stage.
+# Run this INSIDE WSL, from the clone in the WSL filesystem.
 cargo build --release --locked --manifest-path core/rust/Cargo.toml
 
 # Prove the whole thing works with networking off.
 #   Windows: aeroplane mode, or disable Wi-Fi and unplug Ethernet.
 ./scripts/smoke-native.sh
 ```
+
+**Build inside WSL, and do not reuse a binary built on Windows.** The obvious
+reason is that they are different operating systems and the Windows executable
+will not run. The less obvious one, which cost a red CI run during development,
+is that the two builds do not even contain the same code: the keepalive setup in
+`proxy.rs` puts `TCP_KEEPCNT` behind a `#[cfg]` that excludes Windows, so a
+Windows build compiles that line out and cannot tell you whether it is correct.
+A green build on Windows says nothing about the branch it skipped.
+
+The practical rule for anything that will be demonstrated or measured: build it
+on the platform it will run on, and treat a build from the other one as
+unverified.
 
 The native path has no images to pull and nothing to fetch at run time once the
 apt packages and the release binary exist, which is the main reason it is the
