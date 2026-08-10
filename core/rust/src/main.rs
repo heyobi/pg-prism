@@ -6,10 +6,20 @@ use tokio::net::TcpListener;
 use pg_prism_rust::guardian::Guardian;
 use pg_prism_rust::proxy::handle_client;
 use pg_prism_rust::tls::load_tls_acceptor;
+use pg_prism_rust::trust::TrustedProxies;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+
+    // Who may send us a PROXY header. Refuse to start on a malformed list
+    // rather than falling back to a default that trusts more than the operator
+    // asked for.
+    let trusted = Arc::new(TrustedProxies::from_env().map_err(|e| {
+        log::error!("{}", e);
+        e
+    })?);
+    log::info!("Accepting PROXY headers only from: {}", trusted.spec());
 
     // Initialize Guardian
     let guardian = Arc::new(Guardian::new("guardian.yaml").unwrap_or_else(|| {
@@ -54,9 +64,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let pg_addr = pg_addr.clone();
         let guardian = guardian.clone();
         let tls_acceptor = tls_acceptor.clone();
+        let trusted = trusted.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client_socket, pg_addr, guardian, tls_acceptor).await {
+            if let Err(e) =
+                handle_client(client_socket, pg_addr, guardian, tls_acceptor, trusted).await
+            {
                 log::error!("Connection dropped: {}", e);
             }
         });

@@ -11,6 +11,13 @@ use crate::protocol::{
     extract_user_db, inject_ip_startup, make_error_response, process_extended_query,
     process_simple_query, GSSENC_REQUEST, SSL_REQUEST, STARTUP_MESSAGE,
 };
+use crate::trust::{RejectionLog, TrustedProxies};
+
+/// Process-wide throttle for "untrusted peer" warnings. Rejections are
+/// attacker-triggerable, so one log line per rejected connection would be a log
+/// amplification vector.
+static UNTRUSTED_PEER_LOG: std::sync::LazyLock<RejectionLog> =
+    std::sync::LazyLock::new(RejectionLog::default);
 
 // Trait alias for dynamic read/write stream (used for plain TcpStream and TlsStream)
 pub trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -21,7 +28,40 @@ pub async fn handle_client(
     pg_addr: String,
     guardian: Arc<Guardian>,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
+    trusted: Arc<TrustedProxies>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+
+    // 0. Is this peer allowed to speak the PROXY protocol to us?
+    //
+    // The header is an unauthenticated assertion. It is only meaningful from a
+    // load balancer we operate, so the check happens here, before a single byte
+    // of the header is parsed. Anything else is refused without reading: the
+    // listener exists solely to receive HAProxy's send-proxy traffic, and a
+    // connection from elsewhere is a misconfiguration or an attempt to forge a
+    // source address.
+    let peer_ip = client_socket.peer_addr()?.ip();
+    if !trusted.is_trusted(peer_ip) {
+        if let Some(suppressed) = UNTRUSTED_PEER_LOG.should_log() {
+            if suppressed > 0 {
+                log::warn!(
+                    "Refused connection from {}: not in TRUSTED_PROXIES ({}). \
+                     {} further rejections suppressed.",
+                    peer_ip,
+                    trusted.spec(),
+                    suppressed
+                );
+            } else {
+                log::warn!(
+                    "Refused connection from {}: not in TRUSTED_PROXIES ({}). \
+                     Only load balancers listed there may send a PROXY header; \
+                     clients must not connect to this port directly.",
+                    peer_ip,
+                    trusted.spec()
+                );
+            }
+        }
+        return Ok(());
+    }
 
     // 1. HAProxy PROXY Protocol Header Okuma
     let mut buf_reader = BufReader::new(client_socket);

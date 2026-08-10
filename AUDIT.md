@@ -1,5 +1,10 @@
 # PG-Prism — Pre-Conference Codebase Audit
 
+> **This document describes defects, some of which are not yet fixed.** It is a
+> work list, not a description of the current code. See the *Remediation status*
+> table below for what has been addressed and in which commit. For the current
+> shipped behaviour and its limits, read the README.
+
 **Audit date:** 2026-08-10 · **Commit:** `73ec20a` (branch `main`, clean tree)
 **Target event:** PGDay Israel 2026, 2026-10-25 · **Slide deadline:** 2026-10-01
 **Scope:** full repository — Rust core, Python core, docs, Docker/HAProxy config, benchmarks, committed artifacts.
@@ -727,6 +732,7 @@ hash from before the rewrite is dead.
 
 | Finding | Status | Commit | Note |
 |---|---|---|---|
+| 1 — PROXY header trusted from any peer; client IP and Guardian IP rules spoofable | **fixed** | `073fdd3` | New `TRUSTED_PROXIES` allowlist checked against the real TCP peer before the header is parsed; loopback-only default; fails closed on a malformed list and refuses to start. Reproduced first: `tests/trusted_proxy.rs` originally asserted that a forged header from an arbitrary peer was honoured, and passed. |
 | 9 — build artifacts, binary, screenshot, AI transcript, notebook in history | **fixed** | `f3a5b91`, history rewrite | 79.45 MiB -> 50 KiB. Two commits (`e4ede12` "readmemd", `88a78e1` "testler basarili") contained nothing but removed content and were pruned as empty. |
 | 27 — "feature parity" false; Python core ignores LISTEN_HOST/LISTEN_PORT | **removed** | `862f731` | Python core retired to `contrib/python/`; the claim is gone and the divergences are documented rather than denied. |
 | 39 — Python regex YAML parser silently drops block lists | **removed** | `862f731` | Same. Documented in `contrib/python/README.md`. |

@@ -107,6 +107,14 @@ Compile the proxy using Podman/Docker and run it as a standalone binary.
 | `LISTEN_PORT` | `5433` | Port to listen on |
 | `PG_HOST` | `localhost`| Target PostgreSQL Host |
 | `PG_PORT` | `5432` | Target PostgreSQL Port |
+| `TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | Comma-separated CIDRs allowed to send a PROXY header. Connections from anywhere else are refused without being read. |
+
+> **`TRUSTED_PROXIES` is a security control, not a convenience setting.** The
+> PROXY header is an unauthenticated claim about who the peer is talking to. Any
+> peer allowed to send one can assert any client address, which both falsifies
+> `pg_stat_activity` and satisfies Guardian `ips:` rules. List only the load
+> balancers you operate. The proxy refuses to start if the list is malformed, and
+> `TRUSTED_PROXIES=0.0.0.0/0,::/0` disables the protection entirely.
 
 ## 🔗 HAProxy Configuration
 

@@ -20,6 +20,9 @@ services:
       - PG_HOST=postgres
       - PG_PORT=5432
       - LISTEN_PORT=5433
+      # HAProxy is a separate container here, so it is not on loopback and the
+      # default allowlist would refuse it. Trust the compose network only.
+      - TRUSTED_PROXIES=172.29.0.0/16
     ports:
       - "5433:5433"
     volumes:
@@ -44,3 +47,8 @@ services:
 networks:
   pg-network:
     driver: bridge
+    # Pinned so TRUSTED_PROXIES above can name it. Without a fixed subnet Docker
+    # picks one at random and the allowlist would be a guess.
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
