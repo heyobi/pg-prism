@@ -1,6 +1,6 @@
 # PG-Prism: Kapsamlı Mimari ve Protokol Kılavuzu
 
-Bu döküman, **PG-Prism** projesinin çalışma felsefesini, PostgreSQL wire-protokolü seviyesindeki araya girme (interception) mantığını, Python ve Rust çekirdeklerindeki mimari tasarım kararlarını, karşılaşılan borrow checker engellerini ve çözümlerini kapsamlı bir şekilde açıklamaktadır. 
+Bu döküman, **PG-Prism** projesinin çalışma felsefesini, PostgreSQL wire-protokolü seviyesindeki araya girme (interception) mantığını, Rust çekirdeğindeki mimari tasarım kararlarını, karşılaşılan borrow checker engellerini ve çözümlerini kapsamlı bir şekilde açıklamaktadır. 
 
 ---
 
@@ -10,9 +10,9 @@ Bu döküman, **PG-Prism** projesinin çalışma felsefesini, PostgreSQL wire-pr
 PG-Prism, PostgreSQL veritabanı ile istemciler (Örn: DBeaver, Go/Java/Python uygulamaları) arasına şeffaf bir şekilde yerleşen (transparent proxy), trafiği izleyen, manipüle eden (query rewriting) ve kural tabanlı olarak engelleyen bir **Database Proxy / Sidecar** yazılımıdır.
 
 ### B. Tasarım İlkeleri
-1.  **Sıfır Dış Bağımlılık (Zero External Dependencies):** Python çekirdeği tamamen standart kütüphane (`asyncio`, `struct`, `ssl`, `re`) ile çalışır. Rust çekirdeği ise yalnızca temel asenkron ve YAML kütüphanelerini (`tokio`, `native-tls`, `serde`) kullanır.
-2.  **Yüksek Performans ve Düşük Gecikme (Low Latency):** Özellikle Rust çekirdeğinde, her istemci bağlantısı ve sorgusu için sıfıra yakın bellek tahsisi (zero-allocation) hedeflenmiştir.
-3.  **Çift Çekirdek Yapısı (Feature Parity):** Hem Python (kolay taşınabilirlik ve script esnekliği) hem de Rust (maksimum throughput ve kararlılık) motorları birebir aynı kuralları çalıştırır ve aynı protokol çıktılarını verir.
+1.  **Küçük ve Denetlenebilir Bağımlılık Kümesi:** Rust çekirdeği `tokio`, `native-tls`, `serde`/`serde_yaml`, `cidr`, `chrono`, `memchr` ve `log`/`env_logger` kullanır. `native-tls` platformun TLS kütüphanesine (Linux'ta OpenSSL) bağlanır. Bu "sıfır bağımlılık" değildir; amaç bağımlılık kümesini tek oturumda gözden geçirilebilecek kadar küçük tutmaktır.
+2.  **Düşük Gecikme:** Tasarım hedefi, 1 KB üzerindeki paketleri hiç ayrıştırmadan aktararak toplu trafiği ayrıştırma maliyetinden muaf tutmaktır. Bağlantı başına sabit sayıda tahsis yapılır; bu "zero-allocation" değildir. Ölçülen gecikme için `BENCHMARK.md` dosyasına bakınız.
+3.  **Tek Uygulama:** Bakımı yapılan tek çekirdek Rust çekirdeğidir. Özgün Python prototipi `contrib/python/` altında, bakımı yapılmayan bir referans uygulaması olarak durmaktadır ve davranışının Rust çekirdeğiyle aynı olduğu **garanti edilmez**.
 
 ### C. Ağ ve Trafik Akışı
 
@@ -86,32 +86,7 @@ Sürücüler parametrik sorgularda Extended protokolü kullanır. PG-Prism sorgu
 
 ---
 
-## 3. Python Çekirdeği (Python Core) Tasarımı
-
-Python çekirdeği, asenkron G/Ç işlemleri için `asyncio` kütüphanesini temel alır.
-
-### A. SSL Sonlandırma Mantığı
-Python'da plaintext soketi TLS soketine yükseltmek için `StreamWriter` sınıfının asenkron `start_tls` metodu kullanılır:
-
-```python
-# SSLRequest geldikten sonra istemciye 'S' gönderilir
-client_writer.write(b'S')
-await client_writer.drain()
-
-# Soket TLS katmanına yükseltilir
-ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-ssl_context.load_cert_chain(certfile=SSL_CERT_PATH, keyfile=SSL_KEY_PATH)
-
-# start_tls asenkron olarak TLS handshake yapar ve soketi şeffaf şekilde günceller
-await client_writer.start_tls(ssl_context)
-```
-
-### B. Bağımlılıksız YAML Ayrıştırıcı
-Harici kütüphane kurmamak için `guardian.yaml` dosyasını satır satır okuyan basit bir YAML parse mantığı yazılmıştır. Girintileri (indentation) ve liste başlangıçlarını (`-`) takip ederek verileri Python sözlüklerine (`dict`) dönüştürür.
-
----
-
-## 4. Rust Çekirdeği (Rust Core) Tasarımı
+## 3. Rust Çekirdeği (Rust Core) Tasarımı
 
 Rust çekirdeği, maksimum eşzamanlılık ve en düşük bellek ayak izi için `tokio` ve `native-tls` tabanlıdır.
 
@@ -164,13 +139,13 @@ let server_to_client = async move {
 
 ---
 
-## 5. Kritik Algoritmik Çözümler ve Hack'ler
+## 4. Kritik Algoritmik Çözümler ve Hack'ler
 
 ### A. 63-Byte Kırpma (Application Name Truncation) Algoritması
 PostgreSQL'in `application_name` sınırı 63 bayttır. Eğer istemci adı `DBeaver` ve istemci IP'si `192.168.1.50` ise, oluşturacağımız yeni değer `DBeaver - 192.168.1.50` olur.
 Eğer orijinal ad çok uzunsa (Örn: `MyVeryLongCorporateApplicationNameThatIsTooLong`), IP adresini eklediğimizde sınır aşılır ve IP adresi kırpılır (Örn: `... - 192.168.1.5`).
 
-#### Çözüm Algoritması (Python / Rust Ortak):
+#### Çözüm Algoritması:
 1.  `suffix = " - " + IP` uzunluğu hesaplanır (Örn: `192.168.1.50` için `3 + 12 = 15` bayt).
 2.  Kullanılabilir alan: `available_len = 63 - suffix.len()`.
 3.  Eğer `available_len <= 0` ise, doğrudan `suffix` değerinin ilk 63 karakteri kullanılır.
@@ -235,7 +210,7 @@ Sorgu engelleme anında bu iki paket arka arkaya gönderilerek istemcinin sonrak
 
 ---
 
-## 6. Guardian YAML Kural Yapısı
+## 5. Guardian YAML Kural Yapısı
 
 Kurallar `guardian.yaml` dosyası içinde tanımlanır. Motor bu kuralları yukarıdan aşağıya (first-match-wins) tarar.
 
@@ -258,10 +233,10 @@ rules:
 
 ---
 
-## 7. Derleme ve Çalıştırma Yönergeleri
+## 6. Derleme ve Çalıştırma Yönergeleri
 
 ### A. Docker Compose Ortamı
-PG-Prism, `docker-compose.yml` dosyasında `CORE_TYPE` değişkenine göre (`rust` veya `python`) ayağa kalkar:
+PG-Prism, `docker-compose.yml` dosyasıyla ayağa kalkar:
 
 ```yaml
   pg-prism:
@@ -271,7 +246,6 @@ PG-Prism, `docker-compose.yml` dosyasında `CORE_TYPE` değişkenine göre (`rus
       - PG_HOST=postgres
       - PG_PORT=5432
       - LISTEN_PORT=5433
-      - CORE_TYPE=rust  # Veya 'python'
     ports:
       - "5433:5433"
     volumes:
@@ -294,7 +268,7 @@ backend pg_prism_backend
 
 ---
 
-## 8. Gelecekteki Yapay Zeka Modelleri İçin Notlar
+## 7. Gelecekteki Yapay Zeka Modelleri İçin Notlar
 
 > [!IMPORTANT]
 > **PG-Prism Geliştirirken Dikkat Edilmesi Gereken Protokol Kuralları:**

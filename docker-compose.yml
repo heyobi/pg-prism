@@ -20,7 +20,6 @@ services:
       - PG_HOST=postgres
       - PG_PORT=5432
       - LISTEN_PORT=5433
-      - CORE_TYPE=rust
     ports:
       - "5433:5433"
     volumes:

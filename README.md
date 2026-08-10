@@ -5,13 +5,11 @@
 When using HAProxy, PgBouncer, or other load balancers, the database sees the proxy's IP address instead of the real client's IP. PG-Prism bridges this gap by transparently injecting the real client IP into the PostgreSQL `application_name` session variable.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.12-yellow.svg)
-![Rust](https://img.shields.io/badge/rust-1.80-orange.svg)
+![Rust](https://img.shields.io/badge/rust-1.85-orange.svg)
 ![Status](https://img.shields.io/badge/status-beta-orange.svg)
 
 ## 🚀 Features
 
-*   **Dual Core Architecture**: Choose between the flexible **Python Core** (default) or the high-performance **Rust Core** 🦀.
 *   **Transparent IP Injection**: Appends the real client IP to `application_name` (e.g., `DBeaver - 192.168.1.50`).
 *   **PROXY Protocol Support**: Native support for HAProxy `PROXY v1` header.
 *   **Smart Lightweight Filter**: Inspects *only* small Query/Parse packets (< 1KB). Large data transfers (COPY, INSERTs, SELECTs) are blindly forwarded with **zero parsing overhead**.
@@ -31,33 +29,21 @@ graph LR
 
 ### Option 1: Docker (Recommended)
 
-The Docker image includes both Python and Rust cores. You can switch between them using `CORE_TYPE`.
-
 ```bash
 # build the image
 docker build -t pg-prism .
 
-# run it (Default: Python)
 docker run -d \
   -p 5433:5433 \
   -e PG_HOST=localhost \
   -e PG_PORT=5432 \
   --name pg-prism \
   pg-prism
-
-# run it (High Performance: Rust 🦀)
-docker run -d \
-  -p 5433:5433 \
-  -e PG_HOST=localhost \
-  -e PG_PORT=5432 \
-  -e CORE_TYPE=rust \
-  --name pg-prism-rust \
-  pg-prism
 ```
 
-### Option 2: Rust Core (High Performance - Manual Build)
+### Option 2: Standalone binary (Manual Build)
 
-For maximum performance, compile the Rust core using Podman/Docker and run it as a standalone binary.
+Compile the proxy using Podman/Docker and run it as a standalone binary.
 
 1.  **Compile with Podman/Docker**:
     ```bash
@@ -66,7 +52,7 @@ For maximum performance, compile the Rust core using Podman/Docker and run it as
     
     # Extract binary
     podman create --name temp-extract pg-prism
-    podman cp temp-extract:/app/rust_core ./pg-prism-rust
+    podman cp temp-extract:/app/pg-prism ./pg-prism-rust
     podman rm temp-extract
     chmod +x pg-prism-rust
     ```
@@ -86,10 +72,6 @@ For maximum performance, compile the Rust core using Podman/Docker and run it as
     User=postgres
     WorkingDirectory=/opt/pg-prism
     
-    # Python Core (Default)
-    # ExecStart=/usr/bin/python3 core/python/main.py
-    
-    # Rust Core (Ultra-Fast 🦀)
     ExecStart=/opt/pg-prism/pg-prism-rust
 
     Restart=always
@@ -125,7 +107,6 @@ For maximum performance, compile the Rust core using Podman/Docker and run it as
 | `LISTEN_PORT` | `5433` | Port to listen on |
 | `PG_HOST` | `localhost`| Target PostgreSQL Host |
 | `PG_PORT` | `5432` | Target PostgreSQL Port |
-| `CORE_TYPE` | `python` | Proxy Engine: `python` or `rust` |
 
 ## 🔗 HAProxy Configuration
 
