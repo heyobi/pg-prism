@@ -735,6 +735,7 @@ hash from before the rewrite is dead.
 | 49 — `ENV CORE_TYPE=python  ` trailing whitespace | **removed** | `862f731` | Entrypoint switch deleted with the Python core. |
 | 26 — "zero allocation / zero dependency / zero overhead" | **partially fixed** | `862f731` | The false claims are out of the architecture guide. The README rewrite (A7) and the measured figure (Phase B) are still outstanding. |
 | 48 — `.gitignore` does not exclude generated key material | **fixed** | `f3a5b91` | |
+| 51 — **new, not in the original audit**: committed `Cargo.lock` is stale; `cargo build --locked` fails | **fixed** | `89753a9` | The lock had no `native-tls`/`tokio-native-tls`/`openssl` entries despite Cargo.toml depending on them since the SSL commits. No build of this project was ever reproducible from the repository alone. Found because the Dockerfile now builds with `--locked`. |
 | 43 — `benchmark.py` measures `psql` process spawn against a dead port | **removed** | history rewrite | Deleted from the working tree and from all history. |
 
 ---
