@@ -742,6 +742,8 @@ hash from before the rewrite is dead.
 | Finding | Status | Commit | Note |
 |---|---|---|---|
 | 1 — PROXY header trusted from any peer; client IP and Guardian IP rules spoofable | **fixed** | `11377ff` | New `TRUSTED_PROXIES` allowlist checked against the real TCP peer before the header is parsed; loopback-only default; fails closed on a malformed list and refuses to start. Reproduced first: `tests/trusted_proxy.rs` originally asserted that a forged header from an arbitrary peer was honoured, and passed. |
+| 52 — **new, found in CI**: PostgreSQL escapes non-ASCII `application_name` to hex before applying NAMEDATALEN, so the injected address was truncated away | **fixed** | `b1c3ad4` | Observed on the first real-PostgreSQL run. Not reproducible against the fake backend, which stores whatever it is handed. Truncation now budgets in stored characters. |
+| 2 — `CancelRequest` unhandled and corrupted | **reproduced, not yet fixed** | — | CI: `the query was never cancelled: it outlived the timeout`. A4. |
 | 3 — the `SET` rewriter corrupts legitimate SQL | **fixed** | `6e69b30` | Deleted, not repaired. Reproduced first: `tests/query_passthrough.rs` captured the mangled statements at the backend. The audit's predicted example was wrong in detail and is corrected in §5.3. |
 | 16 — `RESET` and dollar quoting bypass the interception | **removed** | `6e69b30` | The interception is gone, so the bypasses are moot. The limitation they pointed at (a client can always overwrite `application_name`) is now stated plainly and asserted by a test. |
 | 44 — `bytes` dependency declared and unused | **fixed** | `36e29a3` | |
