@@ -6,6 +6,7 @@
 //! cannot be imported from `tests/`.
 
 pub mod guardian;
+pub mod limits;
 pub mod protocol;
 pub mod proxy;
 pub mod tls;

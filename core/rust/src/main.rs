@@ -1,12 +1,17 @@
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 use pg_prism_rust::guardian::Guardian;
-use pg_prism_rust::proxy::handle_client;
+use pg_prism_rust::limits::Limits;
+use pg_prism_rust::proxy::{handle_client, ProxyConfig};
 use pg_prism_rust::tls::load_tls_acceptor;
 use pg_prism_rust::trust::TrustedProxies;
+
+/// Backoff ceiling for a listener that keeps failing to accept.
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -20,6 +25,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         e
     })?);
     log::info!("Accepting PROXY headers only from: {}", trusted.spec());
+
+    let limits = Limits::from_env().map_err(|e| {
+        log::error!("{}", e);
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+    })?;
 
     // Initialize Guardian
     let guardian = Arc::new(Guardian::new("guardian.yaml").unwrap_or_else(|| {
@@ -56,20 +66,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pg_addr = format!("{}:{}", pg_host, pg_port);
     log::info!("Redirecting traffic to {}", pg_addr);
 
+    let cfg = Arc::new(ProxyConfig {
+        pg_addr,
+        guardian,
+        tls_acceptor,
+        trusted,
+        limits,
+    });
+
+    let mut backoff = Duration::from_millis(0);
+
     loop {
-        let (client_socket, _) = listener.accept().await?;
+        let client_socket = match listener.accept().await {
+            Ok((socket, _)) => {
+                backoff = Duration::from_millis(0);
+                socket
+            }
+            Err(e) => {
+                // Previously this propagated out of main, so running out of
+                // file descriptors terminated the proxy and took every
+                // established connection with it. Descriptor exhaustion is
+                // transient: back off, let the in-flight connections drain,
+                // and keep serving.
+                backoff = match backoff.as_millis() {
+                    0 => Duration::from_millis(10),
+                    _ => (backoff * 2).min(ACCEPT_BACKOFF_MAX),
+                };
+                log::error!("accept() failed: {}. Retrying in {:?}.", e, backoff);
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
+        };
+
         if let Err(e) = client_socket.set_nodelay(true) {
             log::warn!("Failed to set TCP_NODELAY on client socket: {}", e);
         }
-        let pg_addr = pg_addr.clone();
-        let guardian = guardian.clone();
-        let tls_acceptor = tls_acceptor.clone();
-        let trusted = trusted.clone();
 
+        let cfg = cfg.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_client(client_socket, pg_addr, guardian, tls_acceptor, trusted).await
-            {
+            if let Err(e) = handle_client(client_socket, cfg).await {
                 log::error!("Connection dropped: {}", e);
             }
         });

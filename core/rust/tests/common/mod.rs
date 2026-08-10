@@ -19,6 +19,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
 use pg_prism_rust::guardian::Guardian;
+use pg_prism_rust::limits::Limits;
+use pg_prism_rust::proxy::ProxyConfig;
 use pg_prism_rust::trust::TrustedProxies;
 
 /// The first startup packet the backend received, split into its length prefix
@@ -136,24 +138,39 @@ pub async fn spawn_proxy_once_with_trust(
     guardian: Arc<Guardian>,
     trusted: Arc<TrustedProxies>,
 ) -> SocketAddr {
+    spawn_proxy_once_with_config(ProxyConfig {
+        pg_addr: pg_addr.to_string(),
+        guardian,
+        tls_acceptor: None,
+        trusted,
+        limits: test_limits(),
+    })
+    .await
+}
+
+pub async fn spawn_proxy_once_with_config(cfg: ProxyConfig) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let cfg = Arc::new(cfg);
 
     tokio::spawn(async move {
         let Ok((sock, _)) = listener.accept().await else {
             return;
         };
-        let _ = pg_prism_rust::proxy::handle_client(
-            sock,
-            pg_addr.to_string(),
-            guardian,
-            None,
-            trusted,
-        )
-        .await;
+        let _ = pg_prism_rust::proxy::handle_client(sock, cfg).await;
     });
 
     addr
+}
+
+/// Production limits with the timeouts shortened, so timeout behaviour is
+/// actually exercised instead of making the suite take ten seconds per case.
+pub fn test_limits() -> Limits {
+    Limits {
+        handshake_timeout: Duration::from_millis(750),
+        upstream_connect_timeout: Duration::from_millis(750),
+        ..Limits::default()
+    }
 }
 
 pub fn allow_all_guardian() -> Arc<Guardian> {

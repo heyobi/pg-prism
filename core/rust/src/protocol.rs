@@ -28,22 +28,43 @@ pub fn make_error_response(message: &str, code: &str) -> Vec<u8> {
     packet
 }
 
+/// PostgreSQL's NAMEDATALEN limit for `application_name`, in **bytes**.
+pub const NAMEDATALEN_LIMIT: usize = 63;
+
+/// Truncates to at most `max_bytes`, stepping back to the nearest character
+/// boundary.
+///
+/// The limit is a byte count but `&str[..n]` panics unless `n` lands on a
+/// character boundary, so a byte limit and a UTF-8 string cannot be combined
+/// naively. Stepping back can drop at most three bytes.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 pub fn format_application_name(original_name: &str, app_ip: &str) -> String {
     let suffix = format!(" - {}", app_ip);
-    let max_len = 63;
-    if original_name.len() + suffix.len() <= max_len {
+
+    if original_name.len() + suffix.len() <= NAMEDATALEN_LIMIT {
         return format!("{}{}", original_name, suffix);
     }
-    let available_len = max_len.saturating_sub(suffix.len());
-    if available_len == 0 {
-        return suffix[..max_len].to_string();
+
+    // Unreachable with real addresses: the longest IPv6 literal is 45
+    // characters, so the suffix tops out at 48 bytes. The guard costs nothing
+    // and the alternative, if the address source ever changes, is a panic.
+    if suffix.len() >= NAMEDATALEN_LIMIT {
+        return truncate_on_char_boundary(&suffix, NAMEDATALEN_LIMIT).to_string();
     }
-    let truncated_name = if original_name.len() > available_len {
-        &original_name[..available_len]
-    } else {
-        original_name
-    };
-    format!("{}{}", truncated_name, suffix)
+
+    let available = NAMEDATALEN_LIMIT - suffix.len();
+    let truncated = truncate_on_char_boundary(original_name, available);
+    format!("{}{}", truncated, suffix)
 }
 
 pub fn contains_ignore_case_ascii(haystack: &[u8], needle: &[u8]) -> bool {
@@ -63,6 +84,14 @@ pub fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 pub fn inject_ip_startup(payload: &[u8], ip: &str) -> Vec<u8> {
+    // A startup payload opens with a four-byte protocol version. Anything
+    // shorter is not one, so forward it untouched rather than indexing past the
+    // end. Callers reject short packets before reaching here; this guard exists
+    // so the function cannot panic no matter who calls it.
+    if payload.len() < 4 {
+        return payload.to_vec();
+    }
+
     let mut new_payload = Vec::new();
     new_payload.extend_from_slice(&payload[0..4]);
 
@@ -216,6 +245,10 @@ pub fn extract_user_db(payload: &[u8]) -> (String, String) {
     let mut user = String::new();
     let mut db = String::new();
 
+    if payload.len() < 4 {
+        return (user, db);
+    }
+
     let mut params_section = &payload[4..];
     if let Some((last, rest)) = params_section.split_last() {
         if *last == 0 {
@@ -245,4 +278,131 @@ pub fn extract_user_db(payload: &[u8]) -> (String, String) {
     }
 
     (user, db)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- format_application_name -------------------------------------------
+
+    /// AUDIT.md finding #4. NAMEDATALEN is a byte limit, `&str[..n]` is a byte
+    /// index, and slicing a multi-byte character in half panics. Sweeping the
+    /// suffix length moves the cut across every possible alignment.
+    #[test]
+    fn truncation_never_panics_regardless_of_boundary_alignment() {
+        for ch in ["é", "ğ", "→", "🔥"] {
+            let name = ch.repeat(60);
+            for ip_len in 7..=45 {
+                let ip = "1".repeat(ip_len);
+                let out = format_application_name(&name, &ip);
+                assert!(
+                    out.len() <= 63,
+                    "{:?} + {}-byte ip produced {} bytes",
+                    ch,
+                    ip_len,
+                    out.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn output_never_exceeds_the_namedatalen_limit() {
+        for name_len in 0..200 {
+            let name = "a".repeat(name_len);
+            let out = format_application_name(&name, "192.168.100.200");
+            assert!(out.len() <= 63, "{} bytes for name_len {}", out.len(), name_len);
+        }
+    }
+
+    #[test]
+    fn short_names_keep_the_whole_suffix() {
+        assert_eq!(
+            format_application_name("DBeaver", "192.168.1.50"),
+            "DBeaver - 192.168.1.50"
+        );
+    }
+
+    #[test]
+    fn ascii_truncation_keeps_the_ip_intact() {
+        let out = format_application_name(&"x".repeat(200), "10.0.0.1");
+        assert!(out.ends_with(" - 10.0.0.1"), "got {:?}", out);
+        assert_eq!(out.len(), 63);
+    }
+
+    #[test]
+    fn multibyte_truncation_keeps_the_ip_intact() {
+        let out = format_application_name(&"→".repeat(60), "10.0.0.1");
+        assert!(out.ends_with(" - 10.0.0.1"), "got {:?}", out);
+    }
+
+    // ---- inject_ip_startup --------------------------------------------------
+
+    /// AUDIT.md finding #5. A four-byte startup packet yields an empty payload
+    /// and `&payload[0..4]` panics. Unauthenticated, pre-handshake.
+    #[test]
+    fn injection_does_not_panic_on_empty_payload() {
+        let _ = inject_ip_startup(&[], "10.0.0.1");
+    }
+
+    #[test]
+    fn injection_does_not_panic_on_short_payloads() {
+        for n in 0..4 {
+            let payload = vec![0u8; n];
+            let _ = inject_ip_startup(&payload, "10.0.0.1");
+        }
+    }
+
+    /// A CancelRequest body is 12 bytes of binary, not key/value pairs.
+    #[test]
+    fn injection_does_not_panic_on_cancel_request_shaped_input() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&80877102u32.to_be_bytes());
+        payload.extend_from_slice(&4242u32.to_be_bytes());
+        payload.extend_from_slice(&0xdeadbeefu32.to_be_bytes());
+        let _ = inject_ip_startup(&payload, "10.0.0.1");
+    }
+
+    #[test]
+    fn injection_rewrites_an_existing_application_name() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&STARTUP_MESSAGE.to_be_bytes());
+        payload.extend_from_slice(b"user\0postgres\0application_name\0psql\0\0");
+        let out = inject_ip_startup(&payload, "10.0.0.1");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("psql - 10.0.0.1"), "got {:?}", text);
+    }
+
+    // ---- extract_user_db ----------------------------------------------------
+
+    #[test]
+    fn extract_does_not_panic_on_short_payloads() {
+        for n in 0..4 {
+            let payload = vec![0u8; n];
+            let _ = extract_user_db(&payload);
+        }
+    }
+
+    #[test]
+    fn extract_reads_user_and_database() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&STARTUP_MESSAGE.to_be_bytes());
+        payload.extend_from_slice(b"user\0alice\0database\0shop\0\0");
+        assert_eq!(
+            extract_user_db(&payload),
+            ("alice".to_string(), "shop".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_defaults_database_to_user() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&STARTUP_MESSAGE.to_be_bytes());
+        payload.extend_from_slice(b"user\0alice\0\0");
+        assert_eq!(
+            extract_user_db(&payload),
+            ("alice".to_string(), "alice".to_string())
+        );
+    }
 }
