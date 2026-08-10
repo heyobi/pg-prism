@@ -748,6 +748,7 @@ hash from before the rewrite is dead.
 | 19 — no half-close propagation; task and descriptor leak | **fixed** | `00eda16` | **The audit had the direction backwards.** The client-disconnect case already worked; the leak was PostgreSQL closing without the client being told. Both directions now shut down their peer, with an asymmetric join so a half-closed client still receives pending results. |
 | 21 — backend unreachable produced a bare FIN | **fixed** | `00eda16` | Now an ErrorResponse with SQLSTATE 08006. |
 | 37 — `ErrorResponse` omitted the `V` field | **fixed** | `00eda16` | |
+| 22 — protocol 3.1/3.2 startup skips Guardian entirely | **fixed** | `bdbc9e4` | Was Predicted and explicitly unverified; now **Observed** against real psql 18. With a DENY-everything ruleset, adding `max_protocol_version=3.2` turned a refused connection into a working one, while injection kept working so `pg_stat_activity` looked correct. Guardian now runs for every 3.x startup; protocol 2.0 is refused with 08P01. |
 | 7 — Guardian bypassed by ~1 KB of padding | **documented, not fixed** | `f774711` | Now **Observed**: `padding_past_one_kilobyte_bypasses_every_block_rule` asserts the bypass deliberately, with a companion test pinning the just-under case. Raising the threshold only moves the number. Safe to demonstrate on stage. |
 | 15 — IPv6 clients match no `0.0.0.0/0` rule | **fixed, semantics preserved** | `f774711` | CIDR semantics left exact rather than redefined; the loader warns when a rule lists one family only, and the shipped `guardian.yaml` omits `ips` instead. |
 | 17 — table matching case-sensitive | **fixed** | `f5b66c2` | Now ASCII case-insensitive and token-aware. |
@@ -819,7 +820,7 @@ quoted on a conference slide.
 | 19 | Predicted | **Needs a test.** `try_join!` waits for both directions by inspection; no descriptor-leak test exists. |
 | 20 | **Observed** | Four bounds tests hung: silent client, stall after header, oversized length, oversized header. |
 | 21 | Predicted | Code reading. A3 added a connect timeout but the bare close remains; A4 covers it. |
-| 22 | Predicted | Explicitly unverified. Needs a client negotiating `max_protocol_version=3.2`. |
+| 22 | **Observed** | Real psql 18 against a DENY-everything ruleset: default connection refused, `max_protocol_version=3.2` connected and ran a query. Fixed in `bdbc9e4`. |
 | 23 | Predicted | **Needs a test.** The desync follows from the message sequence, not from a run. A6. |
 | 24 | Predicted | Code reading: the panic unwinds past the `if let Err` in the spawn body. |
 | 25 | Predicted | Code reading: the inner `break` leaves work outstanding and falls through to the outer loop. |
@@ -849,7 +850,7 @@ quoted on a conference slide.
 | 49 | **Inspected** | `Dockerfile:25` trailing whitespace. |
 | 50 | **Inspected** | `docker-compose.yml:11` literal. |
 
-**15 Observed, 19 Inspected, 16 Predicted.** The Predicted ones marked *Needs a test* are queued into A6 and A4.
+**16 Observed, 19 Inspected, 15 Predicted.** The Predicted ones marked *Needs a test* are queued into A6 and A4.
 
 ---
 
@@ -880,7 +881,7 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 19 | **S2** | Predicted | No half-close propagation; task and fd leak per abandoned connection | `main.rs:399` | 3 h |
 | 20 | **S2** | **Observed** | No timeouts anywhere: PROXY read, TLS handshake, upstream connect, idle | `main.rs:172`, `:212`, `:291` | 3 h |
 | 21 | **S2** | Predicted | Backend unreachable → bare FIN, no `ErrorResponse` | `main.rs:291` | 1 h |
-| 22 | **S2** | Predicted | Protocol 3.1/3.2 startup skips Guardian connection checks entirely | `main.rs:12`, `:245`, `:269` | 3 h |
+| 22 | **S2** | **Observed** | Protocol 3.1/3.2 startup skips Guardian connection checks entirely | `main.rs:12`, `:245`, `:269` | 3 h |
 | 23 | **S2** | Predicted | Blocked `Parse` desyncs the extended protocol; `ReadyForQuery` sent mid-sequence | `main.rs:336-345` | 3 h |
 | 24 | **S2** | Predicted | Panics in spawned tasks are unlogged and invisible to the client | `main.rs:154-158` | 2 h |
 | 25 | **S2** | Predicted | Partial-read error inside blind-forwarding breaks the inner loop only, desyncing the stream | `main.rs:369-375` | 1 h |
