@@ -1,0 +1,34 @@
+name: Dependency audit
+
+# Deliberately not part of CI.
+#
+# Advisories are published independently of this repository, so gating every
+# push on a third-party feed makes the build non-deterministic: a commit that
+# was green yesterday goes red today with no code change, and the failure has
+# nothing to do with the push that surfaced it. A weekly scan reports the same
+# information without that confusion.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  # Also run when the dependency set itself changes, which is the one case
+  # where a push genuinely can introduce a vulnerable dependency.
+  push:
+    paths:
+      - "core/rust/Cargo.toml"
+      - "core/rust/Cargo.lock"
+      - ".github/workflows/audit.yml"
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Audit dependencies
+        run: cargo audit

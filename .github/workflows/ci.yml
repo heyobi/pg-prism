@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    working-directory: core/rust
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/rust
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: tests (fake backend + real PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: prism-ci-password
+          POSTGRES_DB: postgres
+          # Force SCRAM rather than trust, so the authentication relay is
+          # genuinely exercised. real_postgres.rs asserts this took effect.
+          POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: prism-ci-password
+      PGDATABASE: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/rust
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      # The fast, hermetic suite. No server involved.
+      - name: Unit and fake-backend tests
+        run: cargo test --locked
+
+      # The proxy shells out to the openssl CLI to mint its self-signed
+      # certificate. Confirm it is present before the TLS tests need it, so a
+      # missing binary is a clear failure rather than a confusing one.
+      - name: Check openssl is available
+        run: openssl version
+
+      # The real-PostgreSQL suite. These are #[ignore]d so that `cargo test` on
+      # a developer machine without a server still passes; --include-ignored is
+      # what makes them run here. If this step is ever removed or made
+      # continue-on-error, the suite silently stops proving anything.
+      #
+      # --test-threads=1 because the TLS tests generate certificate files in the
+      # working directory and would otherwise race each other.
+      - name: Real PostgreSQL tests
+        run: cargo test --locked --test real_postgres -- --include-ignored --test-threads=1
+
+      # Guard against the whole real-PG suite being skipped by accident: if the
+      # step above matched zero tests it would still exit 0.
+      - name: Assert the real PostgreSQL tests actually ran
+        run: |
+          count=$(cargo test --locked --test real_postgres -- --include-ignored --list 2>/dev/null \
+                    | grep -c ': test$' || true)
+          echo "real_postgres declares $count tests"
+          if [ "$count" -lt 8 ]; then
+            echo "::error::Expected at least 8 real-PostgreSQL tests, found $count."
+            echo "If tests were removed on purpose, lower this threshold deliberately."
+            exit 1
+          fi
+
+  build-image:
+    name: docker build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      # Builds with --locked, which is what caught the stale lockfile that made
+      # this project unreproducible from a clean checkout.
+      - name: Build the image
+        run: docker build -t pg-prism:ci .
