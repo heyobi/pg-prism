@@ -7,11 +7,11 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_native_tls::TlsAcceptor;
 
-use crate::guardian::{Action, ConnectionContext, Guardian};
+use crate::guardian::{Action, Guardian};
 use crate::limits::Limits;
 use crate::protocol::{
-    extract_user_db, inject_ip_startup, make_error_response, CANCEL_REQUEST, GSSENC_REQUEST,
-    SSL_REQUEST, STARTUP_MESSAGE,
+    extract_user_db, inject_ip_startup, is_supported_startup, make_error_response, startup_major,
+    startup_minor, CANCEL_REQUEST, GSSENC_REQUEST, SSL_REQUEST,
 };
 use crate::trust::{RejectionLog, TrustedProxies};
 
@@ -231,42 +231,65 @@ pub async fn handle_client(
     } = handshake;
 
     // 4. Guardian connection check.
-    let mut guardian_context = ConnectionContext {
-        action: Action::INSPECT,
-        block_queries: vec![],
-        block_tables: vec![],
-    };
-    let mut context_initialized = false;
+    //
+    // `checked_startup_len` guarantees at least four payload bytes, so the
+    // version is always readable here.
+    let protocol = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
-    if payload.len() >= 4 {
-        let protocol = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-        if protocol == STARTUP_MESSAGE {
-            let (user, db) = extract_user_db(&payload);
-            log::info!("Startup: User='{}', DB='{}'", user, db);
-
-            guardian_context = cfg.guardian.check_connection(&client_ip, &user, &db);
-
-            if guardian_context.action == Action::DENY {
-                log::warn!(
-                    "Guardian: Connection denied for {} (User: {}, DB: {})",
-                    client_ip,
-                    user,
-                    db
-                );
-                let err_packet = make_error_response(
-                    &format!(
-                        "Connection denied by PG-Prism Guardian for IP: {}",
-                        client_ip
-                    ),
-                    "28000",
-                );
-                stream.write_all(&err_packet).await?;
-                stream.flush().await?;
-                return Ok(());
-            }
-            context_initialized = true;
-        }
+    // Protocol 2.0 used a different, fixed-width parameter layout. PostgreSQL
+    // dropped it in 14 and this proxy cannot parse it, so refuse rather than
+    // forward something we would corrupt.
+    if !is_supported_startup(protocol) {
+        log::warn!(
+            "Refusing unsupported startup protocol {}.{} from {}",
+            startup_major(protocol),
+            startup_minor(protocol),
+            client_ip
+        );
+        let err = make_error_response("PG-Prism supports PostgreSQL protocol 3 only", "08P01");
+        let _ = stream.write_all(&err).await;
+        let _ = stream.flush().await;
+        return Ok(());
     }
+
+    if startup_minor(protocol) != 0 {
+        // Forwarded untouched; the server negotiates the minor version with the
+        // client. Logged because it changes what a packet capture looks like.
+        log::info!(
+            "Client negotiating protocol {}.{}",
+            startup_major(protocol),
+            startup_minor(protocol)
+        );
+    }
+
+    // Guardian runs for every startup message, whatever minor version it
+    // announces. It used to run only for exactly 196608, so asking for 3.2 —
+    // one connection parameter in libpq 18 — skipped both the connection rules
+    // and, through context_initialized, the query rules as well.
+    let (user, db) = extract_user_db(&payload);
+    log::info!("Startup: User='{}', DB='{}'", user, db);
+
+    let guardian_context = cfg.guardian.check_connection(&client_ip, &user, &db);
+
+    if guardian_context.action == Action::DENY {
+        log::warn!(
+            "Guardian: Connection denied for {} (User: {}, DB: {})",
+            client_ip,
+            user,
+            db
+        );
+        let err_packet = make_error_response(
+            &format!(
+                "Connection denied by PG-Prism Guardian for IP: {}",
+                client_ip
+            ),
+            "28000",
+        );
+        stream.write_all(&err_packet).await?;
+        stream.flush().await?;
+        return Ok(());
+    }
+    let context_initialized = true;
 
     // 5. Connect to upstream PostgreSQL, under its own deadline.
     //

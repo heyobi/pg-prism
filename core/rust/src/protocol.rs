@@ -8,7 +8,34 @@ pub const SSL_REQUEST: u32 = 80877103;
 pub const GSSENC_REQUEST: u32 = 80877104;
 /// Sent on a *second* connection to cancel a query running on the first.
 pub const CANCEL_REQUEST: u32 = 80877102;
+/// Protocol 3.0. Present for readability; do not compare against it to decide
+/// whether something is a startup message — see `startup_major`.
 pub const STARTUP_MESSAGE: u32 = 196608;
+
+/// The major half of a startup protocol version.
+///
+/// Versions are two 16-bit halves: 3.0 is 196608, 3.1 is 196609, 3.2 is 196610.
+/// PostgreSQL 18 speaks 3.2, and libpq will ask for it when a client sets
+/// `max_protocol_version`. Treating only 196608 as "a startup message" meant
+/// every other minor version took an unrecognised path (finding #22).
+pub fn startup_major(version: u32) -> u16 {
+    (version >> 16) as u16
+}
+
+pub fn startup_minor(version: u32) -> u16 {
+    (version & 0xffff) as u16
+}
+
+/// Is this a startup message whose parameter section we can parse?
+///
+/// Any 3.x version uses the same NUL-terminated key/value layout, so newer
+/// minors are handled by forwarding them untouched and letting the server
+/// negotiate. Protocol 2.0 used a different, fixed-width layout; PostgreSQL
+/// dropped it in version 14 and this proxy cannot parse it either, so it is
+/// refused rather than mangled.
+pub fn is_supported_startup(version: u32) -> bool {
+    startup_major(version) == 3
+}
 
 /// Builds an ErrorResponse.
 ///
