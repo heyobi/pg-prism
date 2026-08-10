@@ -396,7 +396,7 @@ This must be defensible against the people who wrote these tools. Where I am sum
 
 | Tool | How it addresses client identity | Where it stops |
 |---|---|---|
-| **PgBouncer `application_name_add_host`** | Added in 1.6, default `off`; appends the client host and port to `application_name`, e.g. `192.168.1.100:12345`. | **This is your closest competitor and you must lead with it.** It works only if PgBouncer *is* the thing that terminates the client connection — if HAProxy sits in front of PgBouncer, PgBouncer sees HAProxy's IP and dutifully records the wrong address. It is also documented as overridable by a client `SET` (the same limitation you have, §5.3). PgBouncer does not read the PROXY protocol. |
+| **PgBouncer `application_name_add_host`** | Added in 1.6, default `off`; appends the client host and port to `application_name`, e.g. `192.168.1.100:12345`. **Verified 2026-08-10 against 1.25.1 — see §15.2.** | **This is your closest competitor and you must lead with it.** It works only if PgBouncer *is* the thing that terminates the client connection. **Observed:** with HAProxy in front, the same client is recorded as `myapp - 127.0.0.1:56148` — HAProxy's address, in the right format, with no error. It is also overridable by a client `SET` (the same limitation you have, §5.3). PgBouncer does not read the PROXY protocol and **hangs silently** if you send it one. Note in fairness that its backend leg to PostgreSQL negotiated TLS 1.3, where yours is plaintext. |
 | **HAProxy `send-proxy` / `send-proxy-v2`** | Preserves the true client address on the wire, correctly and cheaply. | HAProxy can *send* it; **PostgreSQL cannot read it.** The backend sees a startup packet prefixed with a line it does not understand and closes the connection. The entire gap PG-Prism fills is "something must consume that header before PostgreSQL sees it." This is your strongest framing. |
 | **PostgreSQL core PROXY protocol patch** (Magnus Hagander, first posted March 2021, CF entry 36/3032) | The correct, in-core solution: a `proxy_servers` GUC listing trusted CIDRs, after which the real address populates `pg_hba.conf` matching, `log_line_prefix %h`, **and** `pg_stat_activity.client_addr` — the actual column, not a string smuggled through `application_name`. | It has been in the commitfest process for years and, to my knowledge, **is not committed as of PG 18**. *Unverified for the current cycle — check `commitfest.postgresql.org/36/3032/` and the latest thread the week before the talk; if it lands in PG 19 you need to know before you walk on stage.* You should cite this patch approvingly and position PG-Prism as "what you can run on PostgreSQL 13–18 today, until this lands." Do **not** position yourself as an alternative to it. Note also that the patch's `proxy_servers` design is exactly what §5.1 says you are missing — adopt the same model and name. |
 | **`log_line_prefix` with `%h`** | Zero-cost, built in, correct — for the address PostgreSQL actually sees. | Behind any L4 proxy `%h` is the proxy's address. It is also log-only: nothing lands in `pg_stat_activity`, so you cannot answer "who is running this query *right now*". |
@@ -808,7 +808,139 @@ case looked like and had no reason to think about the rest.
 
 ---
 
-## 15. Claims ledger — what backs every statement in the documentation
+## 15. The two experiments the talk rests on
+
+Run 2026-08-10 on the WSL environment: Ubuntu 26.04, PostgreSQL 18.3, HAProxy
+3.2.9, PgBouncer 1.25.1. Both had been asserted from documentation and never
+executed. Both are now **Observed**, with the exact output below.
+
+Scripts: `/tmp/exp1.sh` and `/tmp/exp2.sh` at run time; the reproduction steps are
+inline here because neither is repo infrastructure.
+
+### 15.1 What PostgreSQL does with a PROXY header — the opening slide
+
+HAProxy configured with `send-proxy` pointed **straight at PostgreSQL**, no
+sidecar anywhere:
+
+```haproxy
+backend pg_direct
+    server pg 127.0.0.1:5432 send-proxy
+```
+
+Control, direct to `:5432`, no HAProxy:
+
+```
+ control
+---------
+       1
+(1 row)
+```
+
+Through HAProxy on `:6440`:
+
+```
+psql: error: connection to server at "127.0.0.1", port 6440 failed: server closed the connection unexpectedly
+        This probably means the server terminated abnormally
+        before or while processing the request.
+psql exit code: 2
+```
+
+And in `/var/log/postgresql/postgresql-18-main.log`:
+
+```
+2026-08-10 22:27:39.576 +03 [13418] [unknown]@[unknown] LOG:  invalid length of startup packet
+```
+
+**This is the premise, and it is now a screenshot rather than a citation.**
+
+Three things make it a good opening slide:
+
+1. **The client error is useless.** "The server terminated abnormally" is wrong —
+   the server is fine and still serving. Anyone who has hit this has spent an
+   afternoon looking at the wrong thing.
+2. **The server error is one line and does not mention the proxy.** Nothing in
+   `invalid length of startup packet` points at HAProxy.
+3. **The mechanism is arithmetic anyone can check on stage.** PostgreSQL reads the
+   first four bytes as a big-endian length. Those bytes are the ASCII `PROX`:
+   `0x50524F58` = **1,347,571,544**. Against `MAX_STARTUP_PACKET_LENGTH` of 10000,
+   that is "invalid length". The connection dies on the first four bytes of the
+   header, before anything else is read.
+
+### 15.2 PgBouncer `application_name_add_host` behind HAProxy
+
+`pgbouncer 1.25.1` with `application_name_add_host = 1`, session pooling. The
+client connects over the WSL interface address in **both** cases, so the two hops
+are genuinely different addresses rather than both being loopback.
+
+**A. Client → PgBouncer directly.** The client really is `172.21.35.33`:
+
+```
+      application_name      | client_addr
+----------------------------+-------------
+ myapp - 172.21.35.33:56184 | 127.0.0.1
+(1 row)
+```
+
+Correct. This is the case PgBouncer's feature was designed for, and it works.
+
+**B. Client → HAProxy → PgBouncer.** Same client, same address:
+
+```
+    application_name     | client_addr
+-------------------------+-------------
+ myapp - 127.0.0.1:56148 | 127.0.0.1
+(1 row)
+```
+
+**The recorded address is HAProxy's.** The claim in §7 is confirmed exactly: put
+any L4 proxy in front of PgBouncer and `application_name_add_host` records the
+proxy, not the client — confidently, in the correct format, with a plausible
+ephemeral port. There is no error and no warning. PgBouncer's own log agrees with
+itself:
+
+```
+LOG C-0x...: prism_smoke/prism_smoke@172.21.35.33:56184 login attempt   <- case A
+LOG C-0x...: prism_smoke/prism_smoke@127.0.0.1:56148 login attempt      <- case B
+```
+
+**C. HAProxy with `send-proxy` in front of PgBouncer.** The obvious thing to try
+next, and the result is worse than PostgreSQL's:
+
+```
+psql: error: connection to server at "172.21.35.33", port 6441 failed: timeout expired
+```
+
+**PgBouncer logged nothing at all** — no login attempt, no error, no close. It
+accepted the connection and waited. PostgreSQL at least says `invalid length of
+startup packet`; PgBouncer hangs until the client's timeout.
+
+`strings` on the binary confirms there is no PROXY protocol support to find: it
+contains `application_name_add_host` and no `proxy_protocol`.
+
+### 15.3 What this changes for the positioning
+
+Nothing needs to be walked back — the audit's §7 reading was right. Two
+refinements, both in PG-Prism's favour, and one that is not:
+
+- The comparison is sharper than "PgBouncer only helps if it is your only proxy".
+  It is that **PgBouncer behind HAProxy reports a wrong answer rather than no
+  answer**, and reports it in exactly the format an operator would trust.
+- PgBouncer cannot be fixed by adding `send-proxy`, and fails silently when you
+  try. That closes off the obvious objection "why not just point send-proxy at
+  PgBouncer".
+- **Against us:** PgBouncer's connection to PostgreSQL negotiated
+  `TLSv1.3/TLS_AES_256_GCM_SHA384`. Its backend leg is encrypted; PG-Prism's is
+  plaintext. If anyone asks how this compares to PgBouncer on security, that is
+  the honest answer and it is not favourable. Say it before they do.
+
+Be fair on stage: PgBouncer never claimed PROXY protocol support, and this is a
+pooler being used outside what it documents. The point is not that PgBouncer is
+broken. The point is that **the failure is silent**, which is the same shape as
+§14 and worth naming as an industry-wide pattern rather than a competitor's bug.
+
+---
+
+## 16. Claims ledger — what backs every statement in the documentation
 
 Produced at the end of A7. Every claim the rewritten `README.md` and
 `PG_PRISM_ARCHITECTURAL_GUIDE.md` make, tagged with what stands behind it:
@@ -819,7 +951,7 @@ Produced at the end of A7. Every claim the rewritten `README.md` and
 - **Nothing yet** — asserted from reading code, protocol documents, or general
   knowledge. **Do not put on a slide without doing the work first.**
 
-### 15.1 Backed by a test
+### 16.1 Backed by a test
 
 | Claim | Test |
 |---|---|
@@ -852,25 +984,30 @@ Produced at the end of A7. Every claim the rewritten `README.md` and
 | Backend and client disconnects propagate; a half-closed client still gets its results | `connection_lifecycle::backend_disconnect_closes_the_client_connection`, `::a_half_closed_client_still_receives_pending_responses` |
 | Keepalive is enabled on accepted sockets | `connection_lifecycle::keepalive_is_enabled_on_accepted_sockets` (the option, **not** the kernel behaviour) |
 
-### 15.2 Backed by a measurement
+### 16.2 Backed by a measurement
 
 | Claim | Where it came from |
 |---|---|
 | `pg_stat_activity` shows `smoke-test - 127.0.0.1 \| 127.0.0.1` | `scripts/smoke-native.sh`, run 2026-08-10 on the WSL environment |
 | One libpq connection parameter defeats a DENY-everything ruleset (#22) | real psql 18 in WSL, before and after `bdbc9e4` |
 | CI is green against PostgreSQL 16 and 18 | GitHub Actions, `13d2f90` |
+| **PostgreSQL closes the connection on a PROXY header**, logging `invalid length of startup packet`, while the client is told the server "terminated abnormally" | §15.1, run 2026-08-10. **Was the single most important unbacked claim; it is now the opening slide.** |
+| **PgBouncer's `application_name_add_host` records HAProxy's address**, not the client's, when HAProxy is in front | §15.2, run 2026-08-10 against PgBouncer 1.25.1 |
+| PgBouncer has no PROXY protocol support and **hangs silently** when sent a header | §15.2 case C, plus `strings` on the binary |
+| A client on another interface produces two different addresses in one `pg_stat_activity` row | `scripts/gap-demo.sh`: `gap-demo - 172.21.35.33 \| 127.0.0.1`, and `Real Client IP: 172.21.32.1` from a Windows-side client |
 
-### 15.3 Nothing yet — the gaps
+### 16.3 Nothing yet — the gaps
 
 These are in the documentation and **nothing in the repository proves them.**
 Each is either work to do or a sentence to soften before 2026-10-01.
 
+The two that mattered most — the opening premise and the PgBouncer
+comparison — were run on 2026-08-10 and have moved to §16.2. Both held.
+
 | Claim | Why it is unbacked | What would fix it |
 |---|---|---|
-| "PostgreSQL cannot read the PROXY header; the backend closes the connection" | This is the premise of the entire project and has never been demonstrated here. Taken from the protocol, not from a run. | Point HAProxy `send-proxy` straight at PostgreSQL and capture the error. Ten minutes, and it is the **opening slide**. |
 | `scram-sha-256-plus` is unavailable through the proxy | Reasoned from channel binding needing one TLS session. No test attempts it. | A `real_postgres` test requesting channel binding and asserting the failure mode. |
 | The backend leg carries credentials in clear | Obviously true from the code; no packet capture exists. | A `tcpdump` on the loopback hop, or accept it as Inspected. |
-| PgBouncer's `application_name_add_host` records HAProxy's address when HAProxy is in front | The central competitive claim in §7 and in the README. Read from documentation, never run. | Stand up PgBouncer behind HAProxy and look. **This is the question a PgBouncer maintainer in the audience will ask.** |
 | The core PROXY patch is still uncommitted | True when the audit was written. Status moves. | Re-check `commitfest.postgresql.org/36/3032/` in the week before the talk. |
 | A hung sidecar is still marked UP by the Patroni health check | Reasoned from `haproxy.cfg` and the README, not reproduced. | `SIGSTOP` the proxy and watch HAProxy keep routing to it. |
 | No `SIGTERM` handling; a restart drops every established connection | Inspected — no handler exists in `main.rs`. Not reproduced. | Trivial to demonstrate; worth doing, it is an honest weakness. |
