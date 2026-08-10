@@ -808,6 +808,82 @@ case looked like and had no reason to think about the rest.
 
 ---
 
+## 15. Claims ledger — what backs every statement in the documentation
+
+Produced at the end of A7. Every claim the rewritten `README.md` and
+`PG_PRISM_ARCHITECTURAL_GUIDE.md` make, tagged with what stands behind it:
+
+- **Test** — a named test in `core/rust/tests/` or a `#[cfg(test)]` module.
+  Quotable on a slide.
+- **Measurement** — a command was run and produced the quoted output.
+- **Nothing yet** — asserted from reading code, protocol documents, or general
+  knowledge. **Do not put on a slide without doing the work first.**
+
+### 15.1 Backed by a test
+
+| Claim | Test |
+|---|---|
+| Reads a PROXY v1 header and extracts the client address | `trusted_proxy::trusted_peer_header_is_honoured` |
+| IPv6 clients work, including a full-length 39-character literal | `proxy_header_forms::an_ipv6_proxy_header_yields_the_ipv6_client_address`, `::a_full_length_ipv6_address_still_fits_the_namedatalen_budget` |
+| PROXY v2 is refused rather than misparsed | `proxy_header_forms::a_proxy_v2_header_is_refused_rather_than_misparsed` |
+| Only trusted peers may send a PROXY header; others never reach the backend | `trusted_proxy::untrusted_peer_is_refused_and_never_reaches_the_backend` |
+| A forged header from a trusted peer satisfies Guardian `ips:` rules — the trust boundary is real | `trusted_proxy::forged_loopback_cannot_be_used_to_reach_an_allow_rule`, `real_postgres::forged_client_ip_reaches_pg_stat_activity` |
+| Rewrites `application_name`, adding the parameter when absent | `real_postgres::absent_application_name_is_added` |
+| The address survives a multi-byte name after server-side ASCII escaping | `protocol::the_address_survives_a_multibyte_name_after_server_escaping`, `real_postgres::multibyte_application_name_keeps_the_address_after_server_escaping` |
+| Truncation never panics on any character-boundary alignment | `protocol::truncation_never_panics_regardless_of_boundary_alignment` |
+| `client_addr` still shows the proxy, not the real client | `real_postgres::client_addr_still_shows_the_proxy_not_the_real_client` |
+| `application_name` stays client-writable — `SET` and `RESET` pass through | `query_passthrough::a_client_set_reaches_postgres_unchanged`, `::reset_application_name_reaches_postgres_unchanged` |
+| Legitimate SQL mentioning `application_name` is **not** rewritten | `query_passthrough::a_query_mentioning_application_name_is_not_rewritten`, `::set_config_call_is_not_rewritten`, `::string_literals_mentioning_the_setting_are_not_rewritten` |
+| `scram-sha-256` works through the proxy, and a wrong password still fails | `real_postgres::scram_authentication_succeeds_through_the_proxy`, `::scram_rejects_a_wrong_password` |
+| TLS terminates with the proxy's own certificate; `sslmode=require` completes | `real_postgres::sslmode_require_completes_through_tls_termination` |
+| `verify-full`/`verify-ca` clients reject that certificate | `real_postgres::verifying_clients_reject_the_self_signed_certificate` |
+| `CancelRequest` is relayed verbatim and actually cancels a query | `connection_lifecycle::cancel_request_is_forwarded_verbatim`, `real_postgres::cancel_request_stops_a_running_query` |
+| `GSSENCRequest` is answered `N` and the startup then proceeds | `connection_lifecycle::gssenc_request_is_refused_then_the_startup_proceeds` |
+| Guardian is bypassed by padding past 1 KB | `guardian_rules::padding_past_one_kilobyte_bypasses_every_block_rule`, `::just_under_the_threshold_is_still_inspected` |
+| Token matching: case-insensitive, not substring, still hits comments | `guardian_rules::table_matching_catches_a_different_case_spelling`, `::a_keyword_inside_an_identifier_is_not_blocked`, `::a_keyword_in_a_comment_is_still_blocked` |
+| ASCII-only folding; quoted identifiers of another case are wrongly blocked | `guardian::case_folding_is_ascii_only`, `::a_quoted_identifier_of_different_case_is_a_different_table_but_still_matches` |
+| `0.0.0.0/0` does not match IPv6 clients; omitting `ips` matches both | `guardian_rules::the_ipv4_default_route_does_not_cover_ipv6_clients`, `::a_rule_without_addresses_matches_both_families` |
+| `time_range` wraps midnight | `guardian::an_overnight_range_wraps_around_midnight` |
+| Missing `guardian.yaml` means no rules; a malformed one is fatal | `guardian::a_missing_file_means_no_rules_and_is_not_an_error`, `::a_malformed_file_is_fatal_rather_than_allow_all` |
+| Every 3.x startup is subject to Guardian; 2.0 is refused with `08P01` | `protocol_version.rs`, all five |
+| Malformed `TRUSTED_PROXIES` and malformed timeouts are startup failures | `trust::parse_rejects_malformed_entries`, `limits::zero_and_garbage_timeouts_are_rejected` |
+| Attacker-controlled lengths are bounded; a silent client is disconnected | `input_bounds.rs`, all five |
+| The six silent-acceptance defects (#53–#56) | `silent_acceptance.rs` |
+| Backend and client disconnects propagate; a half-closed client still gets its results | `connection_lifecycle::backend_disconnect_closes_the_client_connection`, `::a_half_closed_client_still_receives_pending_responses` |
+| Keepalive is enabled on accepted sockets | `connection_lifecycle::keepalive_is_enabled_on_accepted_sockets` (the option, **not** the kernel behaviour) |
+
+### 15.2 Backed by a measurement
+
+| Claim | Where it came from |
+|---|---|
+| `pg_stat_activity` shows `smoke-test - 127.0.0.1 \| 127.0.0.1` | `scripts/smoke-native.sh`, run 2026-08-10 on the WSL environment |
+| One libpq connection parameter defeats a DENY-everything ruleset (#22) | real psql 18 in WSL, before and after `bdbc9e4` |
+| CI is green against PostgreSQL 16 and 18 | GitHub Actions, `13d2f90` |
+
+### 15.3 Nothing yet — the gaps
+
+These are in the documentation and **nothing in the repository proves them.**
+Each is either work to do or a sentence to soften before 2026-10-01.
+
+| Claim | Why it is unbacked | What would fix it |
+|---|---|---|
+| "PostgreSQL cannot read the PROXY header; the backend closes the connection" | This is the premise of the entire project and has never been demonstrated here. Taken from the protocol, not from a run. | Point HAProxy `send-proxy` straight at PostgreSQL and capture the error. Ten minutes, and it is the **opening slide**. |
+| `scram-sha-256-plus` is unavailable through the proxy | Reasoned from channel binding needing one TLS session. No test attempts it. | A `real_postgres` test requesting channel binding and asserting the failure mode. |
+| The backend leg carries credentials in clear | Obviously true from the code; no packet capture exists. | A `tcpdump` on the loopback hop, or accept it as Inspected. |
+| PgBouncer's `application_name_add_host` records HAProxy's address when HAProxy is in front | The central competitive claim in §7 and in the README. Read from documentation, never run. | Stand up PgBouncer behind HAProxy and look. **This is the question a PgBouncer maintainer in the audience will ask.** |
+| The core PROXY patch is still uncommitted | True when the audit was written. Status moves. | Re-check `commitfest.postgresql.org/36/3032/` in the week before the talk. |
+| A hung sidecar is still marked UP by the Patroni health check | Reasoned from `haproxy.cfg` and the README, not reproduced. | `SIGSTOP` the proxy and watch HAProxy keep routing to it. |
+| No `SIGTERM` handling; a restart drops every established connection | Inspected — no handler exists in `main.rs`. Not reproduced. | Trivial to demonstrate; worth doing, it is an honest weakness. |
+| Keepalive actually recovers the unreachable-peer leak | Explicitly stated as untested in both the code and the guide. CI cannot drop packets without RST. | A netfilter rule in a container, or leave it documented. |
+| "Bulk traffic pays no inspection cost"; the async-mutex and boxed-stream costs | `BENCHMARK.md` is empty by design until a real run fills it. The guide says both are unmeasured. | Phase B. Until then **no performance number may be quoted from anywhere**, including the deleted notebook. |
+| Findings #23, #25, #31, #38 as described in the guide | Predicted; read from the code, never reproduced. | Listed in §14.1. |
+
+**The first and fourth rows are the important ones.** The project's opening
+premise and its main competitive claim are both currently unbacked, and both are
+cheap to fix.
+
+---
+
 ## Remediation status
 
 Updated as work proceeds. Hashes refer to the rewritten history (see A1); every
