@@ -37,7 +37,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Guardian { rules: vec![] }
     }));
 
-    let ssl_enabled = env::var("SSL_ENABLED").unwrap_or_else(|_| "true".to_string()).to_lowercase() == "true";
+    let ssl_enabled = env::var("SSL_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        == "true";
     let tls_acceptor = if ssl_enabled {
         match load_tls_acceptor() {
             Ok(acc) => {

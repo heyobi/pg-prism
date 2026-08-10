@@ -118,10 +118,7 @@ pub async fn spawn_fake_backend() -> FakeBackend {
         }
     });
 
-    FakeBackend {
-        addr,
-        captured: rx,
-    }
+    FakeBackend { addr, captured: rx }
 }
 
 /// Accepts exactly one connection on an ephemeral port and runs it through
@@ -222,9 +219,6 @@ pub async fn connect_and_send(addr: SocketAddr, bytes: &[u8]) -> std::io::Result
     Ok(sock)
 }
 
-pub async fn with_timeout<T>(
-    d: Duration,
-    fut: impl std::future::Future<Output = T>,
-) -> Option<T> {
+pub async fn with_timeout<T>(d: Duration, fut: impl std::future::Future<Output = T>) -> Option<T> {
     tokio::time::timeout(d, fut).await.ok()
 }

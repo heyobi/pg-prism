@@ -23,7 +23,8 @@ async fn assert_closed_within(sock: &mut TcpStream, what: &str) {
         Some(Ok(n)) => {
             // An ErrorResponse is an acceptable, and nicer, way to refuse.
             assert_eq!(
-                buf[0], b'E',
+                buf[0],
+                b'E',
                 "{}: expected close or ErrorResponse, got {:?}",
                 what,
                 &buf[..n]
@@ -44,8 +45,12 @@ async fn oversized_startup_length_is_refused() {
     let proxy_addr = spawn_proxy_once(backend.addr, allow_all_guardian()).await;
 
     let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
-    sock.write_all(&proxy_v1_header("10.0.0.5", 5555)).await.unwrap();
-    sock.write_all(&(64u32 * 1024 * 1024).to_be_bytes()).await.unwrap();
+    sock.write_all(&proxy_v1_header("10.0.0.5", 5555))
+        .await
+        .unwrap();
+    sock.write_all(&(64u32 * 1024 * 1024).to_be_bytes())
+        .await
+        .unwrap();
     sock.flush().await.unwrap();
 
     assert_closed_within(&mut sock, "oversized startup length").await;
@@ -58,14 +63,19 @@ async fn undersized_startup_length_is_refused() {
     let proxy_addr = spawn_proxy_once(backend.addr, allow_all_guardian()).await;
 
     let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
-    sock.write_all(&proxy_v1_header("10.0.0.5", 5555)).await.unwrap();
+    sock.write_all(&proxy_v1_header("10.0.0.5", 5555))
+        .await
+        .unwrap();
     sock.write_all(&4u32.to_be_bytes()).await.unwrap();
     sock.flush().await.unwrap();
 
     assert_closed_within(&mut sock, "undersized startup length").await;
 
     let reached = with_timeout(Duration::from_millis(300), backend.captured).await;
-    assert!(reached.is_none(), "a 4-byte startup packet reached the backend");
+    assert!(
+        reached.is_none(),
+        "a 4-byte startup packet reached the backend"
+    );
 }
 
 /// Finding #14. The PROXY header is read with `read_until(b'\n')` into an
@@ -105,7 +115,9 @@ async fn client_stalling_after_the_proxy_header_is_disconnected() {
     let proxy_addr = spawn_proxy_once(backend.addr, allow_all_guardian()).await;
 
     let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
-    sock.write_all(&proxy_v1_header("10.0.0.5", 5555)).await.unwrap();
+    sock.write_all(&proxy_v1_header("10.0.0.5", 5555))
+        .await
+        .unwrap();
     sock.flush().await.unwrap();
 
     assert_closed_within(&mut sock, "stall after proxy header").await;

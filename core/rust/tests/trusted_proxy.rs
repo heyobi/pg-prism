@@ -41,7 +41,11 @@ async fn untrusted_peer_is_refused_and_never_reaches_the_backend() {
         .expect("proxy did not close the connection")
     {
         Ok(0) => {}
-        Ok(n) => panic!("proxy sent {} bytes to an untrusted peer: {:?}", n, &buf[..n]),
+        Ok(n) => panic!(
+            "proxy sent {} bytes to an untrusted peer: {:?}",
+            n,
+            &buf[..n]
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
         Err(e) => panic!("unexpected error: {e}"),
     }

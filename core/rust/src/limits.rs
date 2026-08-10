@@ -49,7 +49,8 @@ impl Limits {
     pub fn from_env() -> Result<Self, String> {
         let mut limits = Limits::default();
         if let Ok(v) = std::env::var("HANDSHAKE_TIMEOUT_SECS") {
-            limits.handshake_timeout = Duration::from_secs(parse_secs("HANDSHAKE_TIMEOUT_SECS", &v)?);
+            limits.handshake_timeout =
+                Duration::from_secs(parse_secs("HANDSHAKE_TIMEOUT_SECS", &v)?);
         }
         if let Ok(v) = std::env::var("UPSTREAM_CONNECT_TIMEOUT_SECS") {
             limits.upstream_connect_timeout =

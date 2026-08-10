@@ -150,7 +150,10 @@ pub async fn handle_client(
                     db
                 );
                 let err_packet = make_error_response(
-                    &format!("Connection denied by PG-Prism Guardian for IP: {}", client_ip),
+                    &format!(
+                        "Connection denied by PG-Prism Guardian for IP: {}",
+                        client_ip
+                    ),
                     "28000",
                 );
                 stream.write_all(&err_packet).await?;
@@ -217,26 +220,31 @@ pub async fn handle_client(
             };
 
             let mut len_bytes = [0u8; 4];
-            if client_reader.read_exact(&mut len_bytes).await.is_err() { break; }
+            if client_reader.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
             let msg_len = u32::from_be_bytes(len_bytes);
             let payload_len = (msg_len.saturating_sub(4)) as usize;
 
             if (msg_type == b'Q' || msg_type == b'P') && payload_len < 1024 {
                 query_buf.resize(payload_len, 0);
-                if client_reader.read_exact(&mut query_buf).await.is_err() { break; }
+                if client_reader.read_exact(&mut query_buf).await.is_err() {
+                    break;
+                }
 
                 // GUARDIAN STAGE 2: Query Check
                 if context_initialized {
-                     if !Guardian::check_query(&query_buf, &guardian_context) {
-                          log::warn!("Guardian: Query blocked.");
-                          let err_packet = make_error_response("Query blocked by PG-Prism Guardian", "42501");
-                          let mut guard = client_write_half_clone.lock().await;
-                          if guard.write_all(&err_packet).await.is_ok() {
-                              let _ = guard.write_all(b"Z\x00\x00\x00\x05I").await;
-                              let _ = guard.flush().await;
-                          }
-                          continue; // keep connection open
-                     }
+                    if !Guardian::check_query(&query_buf, &guardian_context) {
+                        log::warn!("Guardian: Query blocked.");
+                        let err_packet =
+                            make_error_response("Query blocked by PG-Prism Guardian", "42501");
+                        let mut guard = client_write_half_clone.lock().await;
+                        if guard.write_all(&err_packet).await.is_ok() {
+                            let _ = guard.write_all(b"Z\x00\x00\x00\x05I").await;
+                            let _ = guard.flush().await;
+                        }
+                        continue; // keep connection open
+                    }
                 }
 
                 let (modified, new_payload) = if msg_type == b'Q' {
@@ -247,24 +255,56 @@ pub async fn handle_client(
 
                 if modified {
                     let new_len = (new_payload.len() + 4) as u32;
-                    if pg_write_half.write_u8(msg_type).await.is_err() { break; }
-                    if pg_write_half.write_all(&new_len.to_be_bytes()).await.is_err() { break; }
-                    if pg_write_half.write_all(&new_payload).await.is_err() { break; }
+                    if pg_write_half.write_u8(msg_type).await.is_err() {
+                        break;
+                    }
+                    if pg_write_half
+                        .write_all(&new_len.to_be_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if pg_write_half.write_all(&new_payload).await.is_err() {
+                        break;
+                    }
                 } else {
-                    if pg_write_half.write_u8(msg_type).await.is_err() { break; }
-                    if pg_write_half.write_all(&len_bytes).await.is_err() { break; }
-                    if pg_write_half.write_all(&query_buf).await.is_err() { break; }
+                    if pg_write_half.write_u8(msg_type).await.is_err() {
+                        break;
+                    }
+                    if pg_write_half.write_all(&len_bytes).await.is_err() {
+                        break;
+                    }
+                    if pg_write_half.write_all(&query_buf).await.is_err() {
+                        break;
+                    }
                 }
             } else {
                 // Blind Forwarding
-                if pg_write_half.write_u8(msg_type).await.is_err() { break; }
-                if pg_write_half.write_all(&len_bytes).await.is_err() { break; }
+                if pg_write_half.write_u8(msg_type).await.is_err() {
+                    break;
+                }
+                if pg_write_half.write_all(&len_bytes).await.is_err() {
+                    break;
+                }
 
                 let mut left = payload_len;
                 while left > 0 {
                     let chunk_len = std::cmp::min(left, transfer_buf.len());
-                    if client_reader.read_exact(&mut transfer_buf[..chunk_len]).await.is_err() { break; }
-                    if pg_write_half.write_all(&transfer_buf[..chunk_len]).await.is_err() { break; }
+                    if client_reader
+                        .read_exact(&mut transfer_buf[..chunk_len])
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if pg_write_half
+                        .write_all(&transfer_buf[..chunk_len])
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     left -= chunk_len;
                 }
             }
@@ -284,7 +324,9 @@ pub async fn handle_client(
                 Err(_) => break,
             };
             let mut guard = client_write_half_clone2.lock().await;
-            if guard.write_all(&buf[..n]).await.is_err() { break; }
+            if guard.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
             let _ = guard.flush().await;
         }
         Ok::<(), BoxError>(())

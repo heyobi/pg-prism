@@ -80,7 +80,9 @@ pub fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
     if haystack.len() < needle.len() {
         return false;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 pub fn inject_ip_startup(payload: &[u8], ip: &str) -> Vec<u8> {
@@ -312,7 +314,12 @@ mod tests {
         for name_len in 0..200 {
             let name = "a".repeat(name_len);
             let out = format_application_name(&name, "192.168.100.200");
-            assert!(out.len() <= 63, "{} bytes for name_len {}", out.len(), name_len);
+            assert!(
+                out.len() <= 63,
+                "{} bytes for name_len {}",
+                out.len(),
+                name_len
+            );
         }
     }
 

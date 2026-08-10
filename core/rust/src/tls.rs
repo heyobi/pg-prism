@@ -1,7 +1,7 @@
 //! TLS termination support.
 
-use std::error::Error;
 use native_tls::Identity;
+use std::error::Error;
 use tokio_native_tls::TlsAcceptor;
 
 fn ensure_ssl_certificates() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -18,9 +18,20 @@ fn ensure_ssl_certificates() -> Result<(), Box<dyn Error + Send + Sync>> {
         // 1. Generate key and crt
         let status = Command::new("openssl")
             .args([
-                "req", "-new", "-newkey", "rsa:2048", "-days", "365",
-                "-nodes", "-x509", "-keyout", key_path, "-out", cert_path,
-                "-subj", "/CN=localhost"
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-days",
+                "365",
+                "-nodes",
+                "-x509",
+                "-keyout",
+                key_path,
+                "-out",
+                cert_path,
+                "-subj",
+                "/CN=localhost",
             ])
             .status()?;
         if !status.success() {
@@ -30,9 +41,16 @@ fn ensure_ssl_certificates() -> Result<(), Box<dyn Error + Send + Sync>> {
         // 2. Export to pkcs12 format
         let status = Command::new("openssl")
             .args([
-                "pkcs12", "-export", "-out", p12_path,
-                "-inkey", key_path, "-in", cert_path,
-                "-passout", "pass:mypassword"
+                "pkcs12",
+                "-export",
+                "-out",
+                p12_path,
+                "-inkey",
+                key_path,
+                "-in",
+                cert_path,
+                "-passout",
+                "pass:mypassword",
             ])
             .status()?;
         if !status.success() {

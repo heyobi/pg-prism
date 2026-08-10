@@ -229,10 +229,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_empty_specification() {
-        assert!(matches!(
-            TrustedProxies::parse(""),
-            Err(TrustError::Empty)
-        ));
+        assert!(matches!(TrustedProxies::parse(""), Err(TrustError::Empty)));
         assert!(matches!(
             TrustedProxies::parse("   ,  , "),
             Err(TrustError::Empty)
