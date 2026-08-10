@@ -748,6 +748,13 @@ hash from before the rewrite is dead.
 | 19 — no half-close propagation; task and descriptor leak | **fixed** | `00eda16` | **The audit had the direction backwards.** The client-disconnect case already worked; the leak was PostgreSQL closing without the client being told. Both directions now shut down their peer, with an asymmetric join so a half-closed client still receives pending results. |
 | 21 — backend unreachable produced a bare FIN | **fixed** | `00eda16` | Now an ErrorResponse with SQLSTATE 08006. |
 | 37 — `ErrorResponse` omitted the `V` field | **fixed** | `00eda16` | |
+| 7 — Guardian bypassed by ~1 KB of padding | **documented, not fixed** | `f774711` | Now **Observed**: `padding_past_one_kilobyte_bypasses_every_block_rule` asserts the bypass deliberately, with a companion test pinning the just-under case. Raising the threshold only moves the number. Safe to demonstrate on stage. |
+| 15 — IPv6 clients match no `0.0.0.0/0` rule | **fixed, semantics preserved** | `f774711` | CIDR semantics left exact rather than redefined; the loader warns when a rule lists one family only, and the shipped `guardian.yaml` omits `ips` instead. |
+| 17 — table matching case-sensitive | **fixed** | `f5b66c2` | Now ASCII case-insensitive and token-aware. |
+| 18 — a malformed config silently degrades to allow-all | **fixed** | `f774711` | Missing file is fine; malformed file is fatal. |
+| 30 — overnight `time_range` never matches | **fixed** | `f774711` | Ranges wrap midnight; malformed ranges match nothing. |
+| 40 — `DROP` matches `eavesdropping` | **fixed** | `f5b66c2` | Whole-token matching. Comments and string literals still match, documented in `guardian.yaml` with a test asserting it. |
+| 53 — **new, measured**: a half-closed client plus an unreachable peer holds a task and two descriptors indefinitely | **fixed** | `f5b66c2`, `e0f3ca0` | Observed: connection still open 4s after half-close with a silent backend, and `SO_KEEPALIVE` was never set. TCP keepalive distinguishes idle from unreachable, which an idle timeout cannot. Not covered end to end by tests; the limit is written down. |
 | 52 — **new, found in CI**: PostgreSQL escapes non-ASCII `application_name` to hex before applying NAMEDATALEN, so the injected address was truncated away | **fixed** | `b1c3ad4` | Observed on the first real-PostgreSQL run. Not reproducible against the fake backend, which stores whatever it is handed. Truncation now budgets in stored characters. |
 | 3 — the `SET` rewriter corrupts legitimate SQL | **fixed** | `6e69b30` | Deleted, not repaired. Reproduced first: `tests/query_passthrough.rs` captured the mangled statements at the backend. The audit's predicted example was wrong in detail and is corrected in §5.3. |
 | 16 — `RESET` and dollar quoting bypass the interception | **removed** | `6e69b30` | The interception is gone, so the bypasses are moot. The limitation they pointed at (a client can always overwrite `application_name`) is now stated plainly and asserted by a test. |
@@ -797,7 +804,7 @@ quoted on a conference slide.
 | 4 | **Observed** | `panicked at src/protocol.rs:42`, sweeping suffix lengths across every byte alignment. |
 | 5 | **Observed** | `panicked at src/protocol.rs:67` on a four-byte startup packet, and `:219` for `extract_user_db`. |
 | 6 | **Inspected** | Both documents read; `README.md:19` and the guide's section 1C state opposite things. The TLS behaviour itself is now **Observed** in CI. |
-| 7 | Predicted | **Needs a test.** `large_queries_are_forwarded_intact` proves large messages skip inspection, but nothing yet drives a *blocked* statement through with padding. A6. |
+| 7 | **Observed** | **Needs a test.** `large_queries_are_forwarded_intact` proves large messages skip inspection, but nothing yet drives a *blocked* statement through with padding. A6. |
 | 8 | Predicted | Code fact that `?` propagates out of `main`; `EMFILE` was never actually induced. |
 | 9 | **Inspected** | `git count-objects`: 79.45 MiB to 50 KiB; 706 tracked files under `target/`. |
 | 10 | **Inspected** | No `#[test]`, no `tests/`, no `.github/` existed. |
@@ -805,9 +812,9 @@ quoted on a conference slide.
 | 12 | Predicted | Not classified. |
 | 13 | **Observed** | The bounds test hung until the proxy was fixed: the declared length was accepted and the read blocked. The 4 GiB allocation itself was not induced; 64 MiB was. |
 | 14 | **Observed** | `oversized_proxy_header_is_refused` hung on 1 MiB with no newline. |
-| 15 | Predicted | **Needs a test.** Code reading only: `0.0.0.0/0` parses successfully so the fallback branch is unreachable. A6 will add an IPv6 Guardian test. |
+| 15 | **Observed** | **Needs a test.** Code reading only: `0.0.0.0/0` parses successfully so the fallback branch is unreachable. A6 will add an IPv6 Guardian test. |
 | 16 | **Observed** | `reset_application_name_reaches_postgres_unchanged` passed against the old code. |
-| 17 | Predicted | **Needs a test.** `memmem::find` is case-sensitive by inspection; nothing drives `SELECT * FROM SECRETS` yet. A6. |
+| 17 | **Observed** | **Needs a test.** `memmem::find` is case-sensitive by inspection; nothing drives `SELECT * FROM SECRETS` yet. A6. |
 | 18 | Predicted | Code reading: `Guardian::new` returns `None` on a parse failure and the caller substitutes empty rules. |
 | 19 | Predicted | **Needs a test.** `try_join!` waits for both directions by inspection; no descriptor-leak test exists. |
 | 20 | **Observed** | Four bounds tests hung: silent client, stall after header, oversized length, oversized header. |
@@ -820,7 +827,7 @@ quoted on a conference slide.
 | 27 | Predicted | Not classified. |
 | 28 | Predicted | Code reading: `into_inner()` discards the buffer. Latent, because well-behaved clients do not pipeline at that point. |
 | 29 | **Inspected** | No semaphore exists in the accept loop. |
-| 30 | Predicted | **Needs a test.** String comparison cannot satisfy an overnight range, by inspection. A6. |
+| 30 | **Observed** | **Needs a test.** String comparison cannot satisfy an overnight range, by inspection. A6. |
 | 31 | Predicted | Explicitly unverified: the proxy does not inspect `options`, but whether `-c` beats the startup parameter was never tested. |
 | 32 | Predicted | Code reading. The CI test asserts only that the address is present, not its exact form, so the leading space is still unconfirmed. |
 | 33 | **Inspected** | v1 only, by inspection of the header parser. |
@@ -830,7 +837,7 @@ quoted on a conference slide.
 | 37 | Predicted | **Needs a test.** The missing `V` field is a file fact; that no driver rejects the message is untested. |
 | 38 | Predicted | Code reading: the ReadyForQuery payload is hardcoded to idle. |
 | 39 | Predicted | Not classified. |
-| 40 | Predicted | **Needs a test.** `DROP` matching `eavesdropping` follows from substring search. A6. |
+| 40 | **Observed** | **Needs a test.** `DROP` matching `eavesdropping` follows from substring search. A6. |
 | 41 | **Inspected** | The guide is in Turkish and its section 8 addresses AI models. |
 | 42 | **Inspected** | No signal handler exists. |
 | 43 | **Inspected** | `benchmark.py` targeted port 5001 and shelled out to `psql`. |
@@ -842,7 +849,7 @@ quoted on a conference slide.
 | 49 | **Inspected** | `Dockerfile:25` trailing whitespace. |
 | 50 | **Inspected** | `docker-compose.yml:11` literal. |
 
-**10 Observed, 19 Inspected, 21 Predicted.** The Predicted ones marked *Needs a test* are queued into A6 and A4.
+**15 Observed, 19 Inspected, 16 Predicted.** The Predicted ones marked *Needs a test* are queued into A6 and A4.
 
 ---
 
@@ -858,7 +865,7 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 4 | **S1** | **Observed** | UTF-8 boundary panic in 63-byte truncation; kills the connection with a bare RST | `main.rs:99` (also `:96`) | 3 h |
 | 5 | **S1** | **Observed** | Out-of-bounds panic on a 4-byte startup packet, unauthenticated | `main.rs:419`, reached via `:252-256`, `:299` | 1 h |
 | 6 | **S1** | **Inspected** | README and architecture guide state opposite TLS behaviour | `README.md:19` vs `PG_PRISM_ARCHITECTURAL_GUIDE.md:30`, `:61` vs `main.rs:116`, `:209-214` | 2 h |
-| 7 | **S1** | Predicted | Guardian fully bypassed by ≥1023 bytes of query padding | `main.rs:330` | Doc, 1 h |
+| 7 | **S1** | **Observed** | Guardian fully bypassed by ≥1023 bytes of query padding | `main.rs:330` | Doc, 1 h |
 | 8 | **S1** | Predicted | `accept()` error propagates out of `main`; `EMFILE` terminates the proxy | `main.rs:146` | 1 h |
 | 9 | **S1** | **Inspected** | Build artifacts (706 files, ~95 MB), a 2.5 MB binary, a screenshot, and an **AI chat transcript** committed; history rewrite required | `core/rust/target/**`, `pg-prism-rust`, `Screenshot…jpg`, `Implement PG-Prism Guardian.md`, `pg_prism_test.ipynb` | 2 h |
 | 10 | **S1** | **Inspected** | Zero tests, zero CI | repo-wide | 2.5 d |
@@ -866,9 +873,9 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 12 | **S1** | Predicted | Committed notebook shows the proxy faster than a direct connection | `pg_prism_test.ipynb` cells 12, 14 | delete |
 | 13 | **S2** | **Observed** | Unbounded allocation from attacker-supplied message length (up to 4 GiB per connection) | `main.rs:195-197`, `:220-221` | 2 h |
 | 14 | **S2** | **Observed** | Unbounded, untimed PROXY header read (slowloris + memory growth) | `main.rs:171-172` | 2 h |
-| 15 | **S2** | Predicted | IPv6 clients match no `0.0.0.0/0` rule and bypass all Guardian query filtering | `guardian.rs:83-87` | 1 h |
+| 15 | **S2** | **Observed** | IPv6 clients match no `0.0.0.0/0` rule and bypass all Guardian query filtering | `guardian.rs:83-87` | 1 h |
 | 16 | **S2** | **Observed** | `RESET application_name;` and dollar-quoted `SET` bypass the interception | `main.rs:466`, `:477` | doc |
-| 17 | **S2** | Predicted | Guardian table matching is case-sensitive; `SELECT * FROM SECRETS` bypasses `block_tables: ["secrets"]` | `guardian.rs:161`, `:177` | 1 h |
+| 17 | **S2** | **Observed** | Guardian table matching is case-sensitive; `SELECT * FROM SECRETS` bypasses `block_tables: ["secrets"]` | `guardian.rs:161`, `:177` | 1 h |
 | 18 | **S2** | Predicted | Guardian config parse failure silently degrades to allow-all | `main.rs:111-114`, `guardian.rs:57-60` | 1 h |
 | 19 | **S2** | Predicted | No half-close propagation; task and fd leak per abandoned connection | `main.rs:399` | 3 h |
 | 20 | **S2** | **Observed** | No timeouts anywhere: PROXY read, TLS handshake, upstream connect, idle | `main.rs:172`, `:212`, `:291` | 3 h |
@@ -881,7 +888,7 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 27 | **S2** | Predicted | "Feature parity" false in six observable ways; Python core ignores `LISTEN_HOST`/`LISTEN_PORT` | `guide:15`; `main.py:10-11`, `:262`, `:444`, `:469` | cut the core |
 | 28 | **S3** | Predicted | `BufReader::into_inner()` discards buffered bytes at five sites | `main.rs:207`, `:224`, `:228`, `:238`, `:247` | 4 h |
 | 29 | **S3** | **Inspected** | No connection limit / no backpressure on accept | `main.rs:145-158` | 2 h |
-| 30 | **S3** | Predicted | Overnight `time_range` values never match | `guardian.rs:103-111`, `main.py:172` | 1 h |
+| 30 | **S3** | **Observed** | Overnight `time_range` values never match | `guardian.rs:103-111`, `main.py:172` | 1 h |
 | 31 | **S3** | Predicted | `options` parameter never inspected; possible `application_name` override vector | `main.rs:440` | 3 h |
 | 32 | **S3** | Predicted | Absent `application_name` yields a leading space (` 1.2.3.4`) in Rust; Python differs | `main.rs:455` vs `main.py:469` | 30 m |
 | 33 | **S3** | **Inspected** | PROXY v2 unsupported; `send-proxy-v2` fails at the header check | `main.rs:175` | 1 d |
@@ -891,7 +898,7 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 37 | **S3** | Predicted | `ErrorResponse` omits the required `V` (non-localised severity) field | `main.rs:68-86` | 30 m |
 | 38 | **S3** | Predicted | `ReadyForQuery` always claims `I`, misreporting transaction state after a block | `main.rs:341` | 1 h |
 | 39 | **S3** | Predicted | Python core's regex YAML parser silently drops block-style lists | `main.py:82-112` | cut the core |
-| 40 | **S3** | Predicted | Guardian command matching is substring-based: `DROP` blocks `eavesdropping` | `guardian.rs:152-157` | 3 h |
+| 40 | **S3** | **Observed** | Guardian command matching is substring-based: `DROP` blocks `eavesdropping` | `guardian.rs:152-157` | 3 h |
 | 41 | **S3** | **Inspected** | Architecture guide is Turkish, and §8 is addressed to "future AI models" | `PG_PRISM_ARCHITECTURAL_GUIDE.md:297-303` | 1 d |
 | 42 | **S3** | **Inspected** | No `SIGTERM` handling or graceful drain | `main.rs:106-160` | 4 h |
 | 43 | **S4** | **Inspected** | `benchmark.py` measures `psql` process spawn against a port nothing listens on | `benchmark.py:10-15`, `:24` | delete |
