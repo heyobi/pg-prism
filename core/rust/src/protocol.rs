@@ -6,11 +6,23 @@
 // Startup-phase protocol codes, big-endian u32 in the first four payload bytes.
 pub const SSL_REQUEST: u32 = 80877103;
 pub const GSSENC_REQUEST: u32 = 80877104;
+/// Sent on a *second* connection to cancel a query running on the first.
+pub const CANCEL_REQUEST: u32 = 80877102;
 pub const STARTUP_MESSAGE: u32 = 196608;
 
+/// Builds an ErrorResponse.
+///
+/// Fields, in the order PostgreSQL itself emits them:
+///   S  severity, localised
+///   V  severity, non-localised. Required since protocol 3.0 and always sent by
+///      the server; it was missing here (finding #37).
+///   C  SQLSTATE
+///   M  primary message
 pub fn make_error_response(message: &str, code: &str) -> Vec<u8> {
     let mut body = Vec::new();
     body.push(b'S');
+    body.extend_from_slice(b"ERROR\0");
+    body.push(b'V');
     body.extend_from_slice(b"ERROR\0");
     body.push(b'C');
     body.extend_from_slice(code.as_bytes());

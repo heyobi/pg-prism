@@ -10,8 +10,8 @@ use tokio_native_tls::TlsAcceptor;
 use crate::guardian::{Action, ConnectionContext, Guardian};
 use crate::limits::Limits;
 use crate::protocol::{
-    extract_user_db, inject_ip_startup, make_error_response, GSSENC_REQUEST, SSL_REQUEST,
-    STARTUP_MESSAGE,
+    extract_user_db, inject_ip_startup, make_error_response, CANCEL_REQUEST, GSSENC_REQUEST,
+    SSL_REQUEST, STARTUP_MESSAGE,
 };
 use crate::trust::{RejectionLog, TrustedProxies};
 
@@ -55,6 +55,39 @@ struct Handshake {
     stream: Box<dyn AsyncReadWrite + Unpin + Send>,
     payload: Vec<u8>,
     client_ip: String,
+}
+
+/// What the client turned out to be asking for.
+enum HandshakeOutcome {
+    /// A normal session. The startup message has been read.
+    Session(Handshake),
+    /// A CancelRequest. This arrives on its own connection, carries the process
+    /// id and secret key of a *different* session, and gets no reply. There is
+    /// nothing here to inject into and nothing for Guardian to evaluate, so the
+    /// bytes are relayed exactly as received.
+    Cancel { payload: Vec<u8>, client_ip: String },
+}
+
+/// Opens the upstream connection under the configured deadline.
+async fn connect_upstream(cfg: &ProxyConfig) -> Result<TcpStream, String> {
+    match timeout(
+        cfg.limits.upstream_connect_timeout,
+        TcpStream::connect(&cfg.pg_addr),
+    )
+    .await
+    {
+        Err(_elapsed) => Err(format!(
+            "upstream {} did not accept a connection within {:?}",
+            cfg.pg_addr, cfg.limits.upstream_connect_timeout
+        )),
+        Ok(Err(e)) => Err(format!("upstream {} unreachable: {}", cfg.pg_addr, e)),
+        Ok(Ok(sock)) => {
+            if let Err(e) = sock.set_nodelay(true) {
+                log::warn!("Failed to set TCP_NODELAY on pg socket: {}", e);
+            }
+            Ok(sock)
+        }
+    }
 }
 
 pub async fn handle_client(
@@ -117,7 +150,31 @@ pub async fn handle_client(
             return Ok(());
         }
         Ok(Err(HandshakeError::Io(e))) => return Err(e),
-        Ok(Ok(h)) => h,
+        Ok(Ok(outcome)) => outcome,
+    };
+
+    // A CancelRequest is relayed verbatim on a throwaway connection and gets no
+    // reply, which is what the protocol specifies. Previously it fell through to
+    // the startup path and was rewritten, which is why query cancellation did
+    // not work through the proxy at all.
+    let handshake = match handshake {
+        HandshakeOutcome::Cancel { payload, client_ip } => {
+            log::info!("CancelRequest from {}: relaying unmodified", client_ip);
+            let mut pg = match connect_upstream(&cfg).await {
+                Ok(s) => s,
+                Err(msg) => {
+                    log::error!("Cannot relay CancelRequest: {}", msg);
+                    return Ok(());
+                }
+            };
+            let len = (payload.len() + 4) as u32;
+            pg.write_all(&len.to_be_bytes()).await?;
+            pg.write_all(&payload).await?;
+            pg.flush().await?;
+            let _ = pg.shutdown().await;
+            return Ok(());
+        }
+        HandshakeOutcome::Session(h) => h,
     };
 
     let Handshake {
@@ -165,30 +222,22 @@ pub async fn handle_client(
     }
 
     // 5. Connect to upstream PostgreSQL, under its own deadline.
-    let pg_socket = match timeout(
-        cfg.limits.upstream_connect_timeout,
-        TcpStream::connect(&cfg.pg_addr),
-    )
-    .await
-    {
-        Err(_elapsed) => {
-            log::error!(
-                "Upstream {} did not accept a connection within {:?}",
-                cfg.pg_addr,
-                cfg.limits.upstream_connect_timeout
-            );
+    //
+    // On failure the client used to get a bare FIN, which psql reports as
+    // "server closed the connection unexpectedly" and JDBC as a generic socket
+    // error. It gets a real diagnostic now: 08006 is connection_failure.
+    let pg_socket = match connect_upstream(&cfg).await {
+        Ok(s) => s,
+        Err(msg) => {
+            log::error!("{}", msg);
+            let err_packet =
+                make_error_response("PG-Prism could not reach the PostgreSQL backend", "08006");
+            let _ = stream.write_all(&err_packet).await;
+            let _ = stream.flush().await;
             return Ok(());
         }
-        Ok(Err(e)) => {
-            log::error!("Upstream {} unreachable: {}", cfg.pg_addr, e);
-            return Ok(());
-        }
-        Ok(Ok(s)) => s,
     };
 
-    if let Err(e) = pg_socket.set_nodelay(true) {
-        log::warn!("Failed to set TCP_NODELAY on pg socket: {}", e);
-    }
     let (mut pg_read_half, mut pg_write_half) = pg_socket.into_split();
 
     // 6. Send the rewritten startup message.
@@ -286,7 +335,11 @@ pub async fn handle_client(
             }
             let _ = pg_write_half.flush().await;
         }
-        Ok::<(), BoxError>(())
+
+        // The client stopped sending. Propagate that upstream as a half-close
+        // rather than leaving PostgreSQL waiting on a socket that will never
+        // carry another byte.
+        let _ = pg_write_half.shutdown().await;
     };
 
     // Server to Client
@@ -305,10 +358,37 @@ pub async fn handle_client(
             }
             let _ = guard.flush().await;
         }
-        Ok::<(), BoxError>(())
+
+        // PostgreSQL is gone. Tell the client, instead of leaving it blocked on
+        // a socket nobody will ever write to again.
+        let mut guard = client_write_half_clone2.lock().await;
+        let _ = guard.shutdown().await;
     };
 
-    let _ = tokio::try_join!(client_to_server, server_to_client);
+    // Finish both directions, but not symmetrically.
+    //
+    // The old code waited for both with try_join!, which meant a connection
+    // survived until the operating system's TCP timeout whenever one side went
+    // quiet without closing.
+    tokio::pin!(client_to_server);
+    tokio::pin!(server_to_client);
+
+    tokio::select! {
+        _ = &mut client_to_server => {
+            // The client stopped sending and PostgreSQL has been given EOF, so
+            // it will finish what it is doing and close. Wait for that with no
+            // deadline: a long query may still be running, and cutting it short
+            // would throw away results a half-closed client is still reading.
+            server_to_client.await;
+        }
+        _ = &mut server_to_client => {
+            // PostgreSQL is gone and the client has been sent EOF. Nothing it
+            // sends now can be answered, so this only bounds a client that
+            // ignores the close.
+            let _ = timeout(cfg.limits.drain_timeout, client_to_server).await;
+        }
+    }
+
     Ok(())
 }
 
@@ -319,7 +399,7 @@ pub async fn handle_client(
 async fn perform_handshake(
     client_socket: TcpStream,
     cfg: &ProxyConfig,
-) -> Result<Handshake, HandshakeError> {
+) -> Result<HandshakeOutcome, HandshakeError> {
     let mut buf_reader = BufReader::new(client_socket);
 
     // 1. PROXY protocol v1 header.
@@ -374,6 +454,11 @@ async fn perform_handshake(
                     continue;
                 }
             }
+            CANCEL_REQUEST => {
+                // Relayed verbatim by the caller. No reply, no injection, no
+                // Guardian: there is no user or database to evaluate.
+                return Ok(HandshakeOutcome::Cancel { payload, client_ip });
+            }
             GSSENC_REQUEST => {
                 log::info!("GSSENCRequest denied.");
                 let mut raw_socket = buf_reader.into_inner();
@@ -389,11 +474,11 @@ async fn perform_handshake(
         }
     }
 
-    Ok(Handshake {
+    Ok(HandshakeOutcome::Session(Handshake {
         stream: client_stream,
         payload,
         client_ip,
-    })
+    }))
 }
 
 /// Validates a startup-phase length prefix and returns the payload size.

@@ -26,6 +26,10 @@ pub struct Limits {
     /// together. A legitimate client completes all of it in milliseconds.
     pub handshake_timeout: Duration,
     pub upstream_connect_timeout: Duration,
+    /// How long to wait for a client to react after PostgreSQL has gone and we
+    /// have sent it EOF. Nothing it sends after that point can be answered, so
+    /// this only bounds a client that ignores the close.
+    pub drain_timeout: Duration,
     pub max_startup_len: usize,
     pub max_proxy_header_len: usize,
 }
@@ -35,6 +39,7 @@ impl Default for Limits {
         Limits {
             handshake_timeout: Duration::from_secs(10),
             upstream_connect_timeout: Duration::from_secs(5),
+            drain_timeout: Duration::from_secs(10),
             max_startup_len: MAX_STARTUP_PACKET_LENGTH,
             max_proxy_header_len: MAX_PROXY_V1_HEADER_LEN,
         }
