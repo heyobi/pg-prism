@@ -767,62 +767,134 @@ hash from before the rewrite is dead.
 
 ---
 
+## Evidence status
+
+Every finding is one of three things. This matters because some of these will be
+quoted on a conference slide.
+
+- **Observed** — something was executed and produced the result quoted in this
+  document. Safe to quote verbatim.
+- **Inspected** — a fact about a file's contents, a configuration, or a git
+  count. No execution needed; safe to quote, but it is a statement about the
+  source, not about runtime behaviour.
+- **Predicted** — inferred from reading the code and **not yet confirmed by
+  running anything**. Do not quote as fact. Finding #3 was Predicted, turned out
+  to be right in substance and wrong in detail, which is exactly the failure mode
+  this column exists to prevent.
+
+| # | Evidence | Basis |
+|---|---|---|
+| 1 | **Observed** | `tests/trusted_proxy.rs` originally asserted the broken behaviour and passed: the backend received `psql - 203.0.113.99` from a peer that was not a load balancer. |
+| 2 | **Observed** | CI, real PostgreSQL: `the query was never cancelled: it outlived the timeout`. `pg_sleep(30)` ran to completion through the proxy. |
+| 3 | **Observed** | `tests/query_passthrough.rs` captured the mangled statements at the backend. The audit's predicted mangling was wrong in detail; §5.3 now carries the observed strings. |
+| 4 | **Observed** | `panicked at src/protocol.rs:42`, sweeping suffix lengths across every byte alignment. |
+| 5 | **Observed** | `panicked at src/protocol.rs:67` on a four-byte startup packet, and `:219` for `extract_user_db`. |
+| 6 | **Inspected** | Both documents read; `README.md:19` and the guide's section 1C state opposite things. The TLS behaviour itself is now **Observed** in CI. |
+| 7 | Predicted | **Needs a test.** `large_queries_are_forwarded_intact` proves large messages skip inspection, but nothing yet drives a *blocked* statement through with padding. A6. |
+| 8 | Predicted | Code fact that `?` propagates out of `main`; `EMFILE` was never actually induced. |
+| 9 | **Inspected** | `git count-objects`: 79.45 MiB to 50 KiB; 706 tracked files under `target/`. |
+| 10 | **Inspected** | No `#[test]`, no `tests/`, no `.github/` existed. |
+| 11 | **Inspected** | `README.md:138` says `check port 8008`; `haproxy.cfg:16` has no `check` at all. Read, not executed. |
+| 12 | Predicted | Not classified. |
+| 13 | **Observed** | The bounds test hung until the proxy was fixed: the declared length was accepted and the read blocked. The 4 GiB allocation itself was not induced; 64 MiB was. |
+| 14 | **Observed** | `oversized_proxy_header_is_refused` hung on 1 MiB with no newline. |
+| 15 | Predicted | **Needs a test.** Code reading only: `0.0.0.0/0` parses successfully so the fallback branch is unreachable. A6 will add an IPv6 Guardian test. |
+| 16 | **Observed** | `reset_application_name_reaches_postgres_unchanged` passed against the old code. |
+| 17 | Predicted | **Needs a test.** `memmem::find` is case-sensitive by inspection; nothing drives `SELECT * FROM SECRETS` yet. A6. |
+| 18 | Predicted | Code reading: `Guardian::new` returns `None` on a parse failure and the caller substitutes empty rules. |
+| 19 | Predicted | **Needs a test.** `try_join!` waits for both directions by inspection; no descriptor-leak test exists. |
+| 20 | **Observed** | Four bounds tests hung: silent client, stall after header, oversized length, oversized header. |
+| 21 | Predicted | Code reading. A3 added a connect timeout but the bare close remains; A4 covers it. |
+| 22 | Predicted | Explicitly unverified. Needs a client negotiating `max_protocol_version=3.2`. |
+| 23 | Predicted | **Needs a test.** The desync follows from the message sequence, not from a run. A6. |
+| 24 | Predicted | Code reading: the panic unwinds past the `if let Err` in the spawn body. |
+| 25 | Predicted | Code reading: the inner `break` leaves work outstanding and falls through to the outer loop. |
+| 26 | **Inspected** | The dependency count and the allocation sites are file facts. The **performance** half of the claim is unmeasured and stays Predicted until Phase B runs. |
+| 27 | Predicted | Not classified. |
+| 28 | Predicted | Code reading: `into_inner()` discards the buffer. Latent, because well-behaved clients do not pipeline at that point. |
+| 29 | **Inspected** | No semaphore exists in the accept loop. |
+| 30 | Predicted | **Needs a test.** String comparison cannot satisfy an overnight range, by inspection. A6. |
+| 31 | Predicted | Explicitly unverified: the proxy does not inspect `options`, but whether `-c` beats the startup parameter was never tested. |
+| 32 | Predicted | Code reading. The CI test asserts only that the address is present, not its exact form, so the leading space is still unconfirmed. |
+| 33 | **Inspected** | v1 only, by inspection of the header parser. |
+| 34 | **Inspected** | The `Dockerfile` contains no `COPY` of `guardian.yaml`. |
+| 35 | **Inspected** | Was Predicted. Now partly settled: CI's `openssl version` step passes and the image installs it explicitly. Whether `python:3.12-slim` shipped it was never tested and no longer matters. |
+| 36 | **Inspected** | Literal in `src/tls.rs`. |
+| 37 | Predicted | **Needs a test.** The missing `V` field is a file fact; that no driver rejects the message is untested. |
+| 38 | Predicted | Code reading: the ReadyForQuery payload is hardcoded to idle. |
+| 39 | Predicted | Not classified. |
+| 40 | Predicted | **Needs a test.** `DROP` matching `eavesdropping` follows from substring search. A6. |
+| 41 | **Inspected** | The guide is in Turkish and its section 8 addresses AI models. |
+| 42 | **Inspected** | No signal handler exists. |
+| 43 | **Inspected** | `benchmark.py` targeted port 5001 and shelled out to `psql`. |
+| 44 | **Observed** | Removed; the crate still builds. |
+| 45 | **Inspected** | Badge says 1.80, Dockerfile says 1.85. |
+| 46 | **Inspected** | Absent from the README table; the Rust core hardcodes the paths. |
+| 47 | **Inspected** | The branch was unreachable by inspection; deleted. |
+| 48 | **Inspected** | `.gitignore` contents. |
+| 49 | **Inspected** | `Dockerfile:25` trailing whitespace. |
+| 50 | **Inspected** | `docker-compose.yml:11` literal. |
+
+**10 Observed, 19 Inspected, 21 Predicted.** The Predicted ones marked *Needs a test* are queued into A6 and A4.
+
+---
+
 ## Findings table
 
 Severity: **S1** = would materially damage credibility on stage or in the repo · **S2** = a reviewer will find it and it is indefensible · **S3** = real but explicable · **S4** = polish.
 
-| # | Sev | Finding | Reference | Effort |
-|---|---|---|---|---|
-| 1 | **S1** | PROXY header trusted from any source; client IP and Guardian IP rules both spoofable | `core/rust/src/main.rs:133`, `:146`, `:172-186` | 4 h |
-| 2 | **S1** | `CancelRequest` unhandled and corrupted by the startup rewriter; query cancellation broken | `main.rs:10-12`, `:245-250`, `:299`, `:417-421` | 1 h |
-| 3 | **S1** | Rewriter corrupts legitimate SQL containing `application_name` (e.g. `pg_settings` queries, `set_config`) | `main.rs:472-495`, `:516-534` | 2 h (delete) |
-| 4 | **S1** | UTF-8 boundary panic in 63-byte truncation; kills the connection with a bare RST | `main.rs:99` (also `:96`) | 3 h |
-| 5 | **S1** | Out-of-bounds panic on a 4-byte startup packet, unauthenticated | `main.rs:419`, reached via `:252-256`, `:299` | 1 h |
-| 6 | **S1** | README and architecture guide state opposite TLS behaviour | `README.md:19` vs `PG_PRISM_ARCHITECTURAL_GUIDE.md:30`, `:61` vs `main.rs:116`, `:209-214` | 2 h |
-| 7 | **S1** | Guardian fully bypassed by ≥1023 bytes of query padding | `main.rs:330` | Doc, 1 h |
-| 8 | **S1** | `accept()` error propagates out of `main`; `EMFILE` terminates the proxy | `main.rs:146` | 1 h |
-| 9 | **S1** | Build artifacts (706 files, ~95 MB), a 2.5 MB binary, a screenshot, and an **AI chat transcript** committed; history rewrite required | `core/rust/target/**`, `pg-prism-rust`, `Screenshot…jpg`, `Implement PG-Prism Guardian.md`, `pg_prism_test.ipynb` | 2 h |
-| 10 | **S1** | Zero tests, zero CI | repo-wide | 2.5 d |
-| 11 | **S1** | Health check probes Patroni, not the sidecar; a hung sidecar is marked UP. `haproxy.cfg` has no check at all | `README.md:138` vs `haproxy.cfg:16` | 2 h |
-| 12 | **S1** | Committed notebook shows the proxy faster than a direct connection | `pg_prism_test.ipynb` cells 12, 14 | delete |
-| 13 | **S2** | Unbounded allocation from attacker-supplied message length (up to 4 GiB per connection) | `main.rs:195-197`, `:220-221` | 2 h |
-| 14 | **S2** | Unbounded, untimed PROXY header read (slowloris + memory growth) | `main.rs:171-172` | 2 h |
-| 15 | **S2** | IPv6 clients match no `0.0.0.0/0` rule and bypass all Guardian query filtering | `guardian.rs:83-87` | 1 h |
-| 16 | **S2** | `RESET application_name;` and dollar-quoted `SET` bypass the interception | `main.rs:466`, `:477` | doc |
-| 17 | **S2** | Guardian table matching is case-sensitive; `SELECT * FROM SECRETS` bypasses `block_tables: ["secrets"]` | `guardian.rs:161`, `:177` | 1 h |
-| 18 | **S2** | Guardian config parse failure silently degrades to allow-all | `main.rs:111-114`, `guardian.rs:57-60` | 1 h |
-| 19 | **S2** | No half-close propagation; task and fd leak per abandoned connection | `main.rs:399` | 3 h |
-| 20 | **S2** | No timeouts anywhere: PROXY read, TLS handshake, upstream connect, idle | `main.rs:172`, `:212`, `:291` | 3 h |
-| 21 | **S2** | Backend unreachable → bare FIN, no `ErrorResponse` | `main.rs:291` | 1 h |
-| 22 | **S2** | Protocol 3.1/3.2 startup skips Guardian connection checks entirely | `main.rs:12`, `:245`, `:269` | 3 h |
-| 23 | **S2** | Blocked `Parse` desyncs the extended protocol; `ReadyForQuery` sent mid-sequence | `main.rs:336-345` | 3 h |
-| 24 | **S2** | Panics in spawned tasks are unlogged and invisible to the client | `main.rs:154-158` | 2 h |
-| 25 | **S2** | Partial-read error inside blind-forwarding breaks the inner loop only, desyncing the stream | `main.rs:369-375` | 1 h |
-| 26 | **S2** | "Zero allocation / zero dependency / zero overhead" all refuted | `guide:13-15`; `main.rs:189`, `:308`, `:392`; `Cargo.toml` | doc, 2 h |
-| 27 | **S2** | "Feature parity" false in six observable ways; Python core ignores `LISTEN_HOST`/`LISTEN_PORT` | `guide:15`; `main.py:10-11`, `:262`, `:444`, `:469` | cut the core |
-| 28 | **S3** | `BufReader::into_inner()` discards buffered bytes at five sites | `main.rs:207`, `:224`, `:228`, `:238`, `:247` | 4 h |
-| 29 | **S3** | No connection limit / no backpressure on accept | `main.rs:145-158` | 2 h |
-| 30 | **S3** | Overnight `time_range` values never match | `guardian.rs:103-111`, `main.py:172` | 1 h |
-| 31 | **S3** | `options` parameter never inspected; possible `application_name` override vector | `main.rs:440` | 3 h |
-| 32 | **S3** | Absent `application_name` yields a leading space (` 1.2.3.4`) in Rust; Python differs | `main.rs:455` vs `main.py:469` | 30 m |
-| 33 | **S3** | PROXY v2 unsupported; `send-proxy-v2` fails at the header check | `main.rs:175` | 1 d |
-| 34 | **S3** | `Dockerfile` never copies `guardian.yaml`; the README quickstart silently runs with no rules | `Dockerfile:1-45`, `README.md:41-56` | 30 m |
-| 35 | **S3** | Runtime shells out to the `openssl` CLI, which the final image may not contain (*unverified*) | `main.rs:33`, `Dockerfile:3`, `:9` | 1 h |
-| 36 | **S3** | Hardcoded PKCS#12 password `"mypassword"` in source | `main.rs:49`, `:63` | 1 h |
-| 37 | **S3** | `ErrorResponse` omits the required `V` (non-localised severity) field | `main.rs:68-86` | 30 m |
-| 38 | **S3** | `ReadyForQuery` always claims `I`, misreporting transaction state after a block | `main.rs:341` | 1 h |
-| 39 | **S3** | Python core's regex YAML parser silently drops block-style lists | `main.py:82-112` | cut the core |
-| 40 | **S3** | Guardian command matching is substring-based: `DROP` blocks `eavesdropping` | `guardian.rs:152-157` | 3 h |
-| 41 | **S3** | Architecture guide is Turkish, and §8 is addressed to "future AI models" | `PG_PRISM_ARCHITECTURAL_GUIDE.md:297-303` | 1 d |
-| 42 | **S3** | No `SIGTERM` handling or graceful drain | `main.rs:106-160` | 4 h |
-| 43 | **S4** | `benchmark.py` measures `psql` process spawn against a port nothing listens on | `benchmark.py:10-15`, `:24` | delete |
-| 44 | **S4** | `bytes` dependency declared and unused | `Cargo.toml:8` | 5 m |
-| 45 | **S4** | Rust badge says 1.80, `Dockerfile` uses 1.85 | `README.md:9` vs `Dockerfile:2` | 5 m |
-| 46 | **S4** | `SSL_ENABLED`, `SSL_CERT_PATH`, `SSL_KEY_PATH` undocumented; the latter two are ignored by the Rust core | `README.md:122-128`, `main.rs:25-27` | 30 m |
-| 47 | **S4** | Dead code: `available_len == 0` branch is unreachable | `main.rs:96-97` | 5 m |
-| 48 | **S4** | `.gitignore` does not exclude generated `*.key`/`*.crt`/`*.p12` | `.gitignore:1-8` | 5 m |
-| 49 | **S4** | `ENV CORE_TYPE=python  ` trailing whitespace before a stray comment line | `Dockerfile:25-26` | 5 m |
-| 50 | **S4** | Hardcoded `POSTGRES_PASSWORD=test123` in the compose file | `docker-compose.yml:11` | 10 m |
+| # | Sev | Evidence | Finding | Reference | Effort |
+|---|---|---|---|---|---|
+| 1 | **S1** | **Observed** | PROXY header trusted from any source; client IP and Guardian IP rules both spoofable | `core/rust/src/main.rs:133`, `:146`, `:172-186` | 4 h |
+| 2 | **S1** | **Observed** | `CancelRequest` unhandled and corrupted by the startup rewriter; query cancellation broken | `main.rs:10-12`, `:245-250`, `:299`, `:417-421` | 1 h |
+| 3 | **S1** | **Observed** | Rewriter corrupts legitimate SQL containing `application_name` (e.g. `pg_settings` queries, `set_config`) | `main.rs:472-495`, `:516-534` | 2 h (delete) |
+| 4 | **S1** | **Observed** | UTF-8 boundary panic in 63-byte truncation; kills the connection with a bare RST | `main.rs:99` (also `:96`) | 3 h |
+| 5 | **S1** | **Observed** | Out-of-bounds panic on a 4-byte startup packet, unauthenticated | `main.rs:419`, reached via `:252-256`, `:299` | 1 h |
+| 6 | **S1** | **Inspected** | README and architecture guide state opposite TLS behaviour | `README.md:19` vs `PG_PRISM_ARCHITECTURAL_GUIDE.md:30`, `:61` vs `main.rs:116`, `:209-214` | 2 h |
+| 7 | **S1** | Predicted | Guardian fully bypassed by ≥1023 bytes of query padding | `main.rs:330` | Doc, 1 h |
+| 8 | **S1** | Predicted | `accept()` error propagates out of `main`; `EMFILE` terminates the proxy | `main.rs:146` | 1 h |
+| 9 | **S1** | **Inspected** | Build artifacts (706 files, ~95 MB), a 2.5 MB binary, a screenshot, and an **AI chat transcript** committed; history rewrite required | `core/rust/target/**`, `pg-prism-rust`, `Screenshot…jpg`, `Implement PG-Prism Guardian.md`, `pg_prism_test.ipynb` | 2 h |
+| 10 | **S1** | **Inspected** | Zero tests, zero CI | repo-wide | 2.5 d |
+| 11 | **S1** | **Inspected** | Health check probes Patroni, not the sidecar; a hung sidecar is marked UP. `haproxy.cfg` has no check at all | `README.md:138` vs `haproxy.cfg:16` | 2 h |
+| 12 | **S1** | Predicted | Committed notebook shows the proxy faster than a direct connection | `pg_prism_test.ipynb` cells 12, 14 | delete |
+| 13 | **S2** | **Observed** | Unbounded allocation from attacker-supplied message length (up to 4 GiB per connection) | `main.rs:195-197`, `:220-221` | 2 h |
+| 14 | **S2** | **Observed** | Unbounded, untimed PROXY header read (slowloris + memory growth) | `main.rs:171-172` | 2 h |
+| 15 | **S2** | Predicted | IPv6 clients match no `0.0.0.0/0` rule and bypass all Guardian query filtering | `guardian.rs:83-87` | 1 h |
+| 16 | **S2** | **Observed** | `RESET application_name;` and dollar-quoted `SET` bypass the interception | `main.rs:466`, `:477` | doc |
+| 17 | **S2** | Predicted | Guardian table matching is case-sensitive; `SELECT * FROM SECRETS` bypasses `block_tables: ["secrets"]` | `guardian.rs:161`, `:177` | 1 h |
+| 18 | **S2** | Predicted | Guardian config parse failure silently degrades to allow-all | `main.rs:111-114`, `guardian.rs:57-60` | 1 h |
+| 19 | **S2** | Predicted | No half-close propagation; task and fd leak per abandoned connection | `main.rs:399` | 3 h |
+| 20 | **S2** | **Observed** | No timeouts anywhere: PROXY read, TLS handshake, upstream connect, idle | `main.rs:172`, `:212`, `:291` | 3 h |
+| 21 | **S2** | Predicted | Backend unreachable → bare FIN, no `ErrorResponse` | `main.rs:291` | 1 h |
+| 22 | **S2** | Predicted | Protocol 3.1/3.2 startup skips Guardian connection checks entirely | `main.rs:12`, `:245`, `:269` | 3 h |
+| 23 | **S2** | Predicted | Blocked `Parse` desyncs the extended protocol; `ReadyForQuery` sent mid-sequence | `main.rs:336-345` | 3 h |
+| 24 | **S2** | Predicted | Panics in spawned tasks are unlogged and invisible to the client | `main.rs:154-158` | 2 h |
+| 25 | **S2** | Predicted | Partial-read error inside blind-forwarding breaks the inner loop only, desyncing the stream | `main.rs:369-375` | 1 h |
+| 26 | **S2** | **Inspected** | "Zero allocation / zero dependency / zero overhead" all refuted | `guide:13-15`; `main.rs:189`, `:308`, `:392`; `Cargo.toml` | doc, 2 h |
+| 27 | **S2** | Predicted | "Feature parity" false in six observable ways; Python core ignores `LISTEN_HOST`/`LISTEN_PORT` | `guide:15`; `main.py:10-11`, `:262`, `:444`, `:469` | cut the core |
+| 28 | **S3** | Predicted | `BufReader::into_inner()` discards buffered bytes at five sites | `main.rs:207`, `:224`, `:228`, `:238`, `:247` | 4 h |
+| 29 | **S3** | **Inspected** | No connection limit / no backpressure on accept | `main.rs:145-158` | 2 h |
+| 30 | **S3** | Predicted | Overnight `time_range` values never match | `guardian.rs:103-111`, `main.py:172` | 1 h |
+| 31 | **S3** | Predicted | `options` parameter never inspected; possible `application_name` override vector | `main.rs:440` | 3 h |
+| 32 | **S3** | Predicted | Absent `application_name` yields a leading space (` 1.2.3.4`) in Rust; Python differs | `main.rs:455` vs `main.py:469` | 30 m |
+| 33 | **S3** | **Inspected** | PROXY v2 unsupported; `send-proxy-v2` fails at the header check | `main.rs:175` | 1 d |
+| 34 | **S3** | **Inspected** | `Dockerfile` never copies `guardian.yaml`; the README quickstart silently runs with no rules | `Dockerfile:1-45`, `README.md:41-56` | 30 m |
+| 35 | **S3** | **Inspected** | Runtime shells out to the `openssl` CLI, which the final image may not contain (*unverified*) | `main.rs:33`, `Dockerfile:3`, `:9` | 1 h |
+| 36 | **S3** | **Inspected** | Hardcoded PKCS#12 password `"mypassword"` in source | `main.rs:49`, `:63` | 1 h |
+| 37 | **S3** | Predicted | `ErrorResponse` omits the required `V` (non-localised severity) field | `main.rs:68-86` | 30 m |
+| 38 | **S3** | Predicted | `ReadyForQuery` always claims `I`, misreporting transaction state after a block | `main.rs:341` | 1 h |
+| 39 | **S3** | Predicted | Python core's regex YAML parser silently drops block-style lists | `main.py:82-112` | cut the core |
+| 40 | **S3** | Predicted | Guardian command matching is substring-based: `DROP` blocks `eavesdropping` | `guardian.rs:152-157` | 3 h |
+| 41 | **S3** | **Inspected** | Architecture guide is Turkish, and §8 is addressed to "future AI models" | `PG_PRISM_ARCHITECTURAL_GUIDE.md:297-303` | 1 d |
+| 42 | **S3** | **Inspected** | No `SIGTERM` handling or graceful drain | `main.rs:106-160` | 4 h |
+| 43 | **S4** | **Inspected** | `benchmark.py` measures `psql` process spawn against a port nothing listens on | `benchmark.py:10-15`, `:24` | delete |
+| 44 | **S4** | **Observed** | `bytes` dependency declared and unused | `Cargo.toml:8` | 5 m |
+| 45 | **S4** | **Inspected** | Rust badge says 1.80, `Dockerfile` uses 1.85 | `README.md:9` vs `Dockerfile:2` | 5 m |
+| 46 | **S4** | **Inspected** | `SSL_ENABLED`, `SSL_CERT_PATH`, `SSL_KEY_PATH` undocumented; the latter two are ignored by the Rust core | `README.md:122-128`, `main.rs:25-27` | 30 m |
+| 47 | **S4** | **Inspected** | Dead code: `available_len == 0` branch is unreachable | `main.rs:96-97` | 5 m |
+| 48 | **S4** | **Inspected** | `.gitignore` does not exclude generated `*.key`/`*.crt`/`*.p12` | `.gitignore:1-8` | 5 m |
+| 49 | **S4** | **Inspected** | `ENV CORE_TYPE=python  ` trailing whitespace before a stray comment line | `Dockerfile:25-26` | 5 m |
+| 50 | **S4** | **Inspected** | Hardcoded `POSTGRES_PASSWORD=test123` in the compose file | `docker-compose.yml:11` | 10 m |
 
 **Totals:** 12 × S1, 15 × S2, 16 × S3, 7 × S4. Tier 1 of §13 clears eleven of the twelve S1 findings in about five days; the twelfth (tests and CI) is the two-and-a-half-day Tier 2 item.
 
