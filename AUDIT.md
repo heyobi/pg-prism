@@ -928,7 +928,7 @@ quoted on a conference slide.
 | 57 | **Inspected** | `main.rs:52-56`: the `Err` arm logs and binds `None`, and the listener starts regardless. |
 | 58 | **Inspected** | `guardian.rs:262-268`: the fall-through returns `Action::INSPECT` with empty block lists and emits no log line. |
 
-**20 Observed, 21 Inspected, 15 Predicted.** The Predicted ones marked *Needs a
+**20 Observed, 21 Inspected, 15 Predicted** (`6811aa0`). The Predicted ones marked *Needs a
 test* are queued into A6 and A4. Findings 53–58 come from the silent-acceptance
 pass (§14) and are **not fixed**; their tests assert the defective behaviour.
 
