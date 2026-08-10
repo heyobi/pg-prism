@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-bytes = "1"
 log = "0.4"
 env_logger = "0.10"
 serde = { version = "1.0", features = ["derive"] }
@@ -15,3 +14,10 @@ chrono = { version = "0.4", features = ["serde"] }
 memchr = "2.5"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
+
+# Test-only. tokio-postgres is a real, independently written PostgreSQL client:
+# it performs SCRAM, the extended query protocol and cancellation the way a
+# driver actually does, rather than the way we assume one does.
+[dev-dependencies]
+tokio-postgres = "0.7"
+postgres-native-tls = "0.5"

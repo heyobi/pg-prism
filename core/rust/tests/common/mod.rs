@@ -160,6 +160,28 @@ pub async fn spawn_proxy_once_with_config(cfg: ProxyConfig) -> SocketAddr {
     addr
 }
 
+/// Serves connections until dropped. Needed wherever a single logical client
+/// opens more than one socket, which CancelRequest does by design.
+pub async fn spawn_proxy_serving(cfg: ProxyConfig) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = Arc::new(cfg);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let cfg = cfg.clone();
+            tokio::spawn(async move {
+                let _ = pg_prism_rust::proxy::handle_client(sock, cfg).await;
+            });
+        }
+    });
+
+    addr
+}
+
 /// Production limits with the timeouts shortened, so timeout behaviour is
 /// actually exercised instead of making the suite take ten seconds per case.
 pub fn test_limits() -> Limits {
