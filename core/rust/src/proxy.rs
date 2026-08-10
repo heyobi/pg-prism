@@ -97,7 +97,18 @@ pub fn configure_socket(sock: &TcpStream, limits: &Limits) {
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(limits.keepalive_time)
         .with_interval(crate::limits::KEEPALIVE_INTERVAL);
-    #[cfg(not(windows))]
+
+    // TCP_KEEPCNT is not portable. socket2 offers with_retries only on the
+    // platforms whose sockets have it, so the list is matched rather than
+    // guessed at with not(windows): OpenBSD and Solaris do not have it either.
+    // Elsewhere the platform's own retry count applies, which is fine.
+    #[cfg(any(
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "netbsd",
+    ))]
     let keepalive = keepalive.with_retries(crate::limits::KEEPALIVE_RETRIES);
 
     if let Err(e) = socket2::SockRef::from(sock).set_tcp_keepalive(&keepalive) {
