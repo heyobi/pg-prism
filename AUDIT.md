@@ -59,7 +59,7 @@
 | `docker-compose.yml` | postgres + pg-prism + haproxy | Source. Hardcoded `POSTGRES_PASSWORD=test123` (`:11`) — demo-only, but flag it in the README. |
 | `haproxy.cfg` | 5434 → pg-prism:5433 `send-proxy` | Source. **No `check` directive at all** (`:16`). |
 | `benchmark.py` | 10× `psql -c "SELECT 1"` subprocess loop, hardcoded port 5001 (`:24`) | **Leftover.** Measures process spawn, not the proxy. Delete. |
-| `pro_benchmark.py` (12.8 KB) | Hand-rolled async PG client, SCRAM, 50 conns × 5 s × 10 iters | Source, genuinely useful — but it measures a hand-written client, not a real driver. Keep as a smoke test, do not benchmark with it (see §10). |
+| `pro_benchmark.py` (12.8 KB) | Hand-rolled async PG client, SCRAM, 50 conns × 5 s × 10 iters | **Deleted** (finding #59). It printed a conclusion, scored a failed connection as 0 TPS, and named three ports none of which this project binds. Replaced by `bench/`. |
 | `requirements.txt` | "no external dependencies" comment only | Keep, or delete — it contains no requirements. |
 
 ### 1.4 Must not be in version control
@@ -514,7 +514,23 @@ Add a `fuzz` job on a weekly cron with a short time budget; nightly fuzzing in P
 ### 10.1 Discard everything currently in the repo
 
 - `benchmark.py` spawns `psql` in a subprocess ten times (`:10-15`). It measures **process creation and TCP connect**, dominated by fork/exec. It also targets port 5001, which nothing in this repo listens on (`:24`). Delete.
-- `pro_benchmark.py` is a decent hand-rolled client, but benchmarking your proxy with your own minimal client invites "you wrote both sides." Keep it as a protocol smoke test; do not present numbers from it.
+- `pro_benchmark.py` was described here as "a decent hand-rolled client, keep it
+  as a protocol smoke test". Reading it in full while building `bench/` showed
+  that is too generous, and it has been **deleted** (finding #59):
+    - It ends by printing `CONCLUSION: Proxy Overhead: N%`. A benchmark that
+      concludes is not a benchmark.
+    - `benchmark_worker` catches every exception, prints it, and returns 0
+      (`:218-220`), which is then averaged into TPS. A configuration that fails
+      to connect at all reports as slow rather than as broken.
+    - It names three ports: the banner says 5001, `ports` is `[5432, 5003]`, and
+      the PROXY header is sent only for 5003. Nothing in this project binds
+      either 5001 or 5003.
+    - No warmup, 5-second iterations, no randomisation of order, and the
+      password `test123` in the source.
+    - There is no HAProxy in the loop; it fabricates the PROXY header itself,
+      so it never measures the hop it claims to.
+  Replaced by `bench/harness.py`, which asserts against exactly the class of
+  result this file was built to celebrate.
 - **`pg_prism_test.ipynb` must not be cited.** Cell 12's committed output reports 281.88 TPS direct versus a *higher* figure through HAProxy+PG-Prism, and cell 14's 50-iteration table opens `222.80` direct / `282.08` through the full proxy chain. A proxy cannot be faster than no proxy; that is noise from a shared Colab VM (177–195 ms average latency at those TPS figures confirms a heavily contended host). If you show it, someone will do that arithmetic out loud.
 
 ### 10.2 The benchmark to run
@@ -1140,8 +1156,9 @@ quoted on a conference slide.
 | 56 | **Observed** | `silent_acceptance.rs::ssl_enabled_accepts_only_one_spelling_of_yes`: `1`, `yes`, `on`, `" true"`, `"true "` all yield plaintext. |
 | 57 | **Inspected** | `main.rs:52-56`: the `Err` arm logs and binds `None`, and the listener starts regardless. |
 | 58 | **Inspected** | `guardian.rs:262-268`: the fall-through returns `Action::INSPECT` with empty block lists and emits no log line. |
+| 59 | **Observed** | Read in full while building `bench/`. Deleted in the same commit. |
 
-**20 Observed, 21 Inspected, 15 Predicted** (`6811aa0`). The Predicted ones marked *Needs a
+**21 Observed, 21 Inspected, 15 Predicted.** The Predicted ones marked *Needs a
 test* are queued into A6 and A4. Findings 53–58 come from the silent-acceptance
 pass (§14) and are **not fixed**; their tests assert the defective behaviour.
 
@@ -1209,6 +1226,7 @@ Severity: **S1** = would materially damage credibility on stage or in the repo �
 | 56 | **S2** | **Observed** | `SSL_ENABLED` accepts only `true`; `1`, `yes`, `on`, or a stray space silently disable TLS | `main.rs:42-45` | 30 m |
 | 57 | **S2** | **Inspected** | TLS initialisation failure under `SSL_ENABLED=true` logs an error and serves plaintext anyway | `main.rs:52-56` | 30 m |
 | 58 | **S3** | **Inspected** | A ruleset matching no rule falls through to allow-everything, unlogged | `guardian.rs:262-268` | 1 h |
+| 59 | **S2** | **Observed** | `pro_benchmark.py` prints a `CONCLUSION` with a proxy-overhead percentage, counts a configuration that fails to connect as 0 TPS rather than as an error, and aims at three different ports in one file | `pro_benchmark.py:219-220`, `:230`, `:246`, `:251`, `:295-301` | delete |
 
 **Totals:** 12 × S1, 15 × S2, 16 × S3, 7 × S4. Tier 1 of §13 clears eleven of the twelve S1 findings in about five days; the twelfth (tests and CI) is the two-and-a-half-day Tier 2 item.
 

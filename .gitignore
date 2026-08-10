@@ -17,6 +17,11 @@ target/
 prism.log
 haproxy.log
 
+# Benchmark output. The harness writes here; the top-level BENCHMARK.md is
+# updated by hand from it, so no run can put numbers into the repository by
+# accident.
+bench/results/
+
 # Python
 __pycache__/
 *.py[cod]
