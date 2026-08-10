@@ -71,8 +71,8 @@ ok "PostgreSQL is up on $PG_PORT"
 
 # ---------------------------------------------------------------------------
 
-log "Creating the smoke-test role and database"
-sudo -u postgres psql -p "$PG_PORT" -v ON_ERROR_STOP=1 -q <<SQL
+setup_role() {
+  sudo -u postgres psql -p "$PG_PORT" -v ON_ERROR_STOP=1 -q <<SQL
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER') THEN
@@ -83,10 +83,24 @@ BEGIN
 END
 \$\$;
 SQL
-sudo -u postgres psql -p "$PG_PORT" -tAc \
-  "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 \
-  || sudo -u postgres createdb -p "$PG_PORT" -O "$DB_USER" "$DB_NAME"
-ok "role and database ready"
+  local exists
+  exists=$(sudo -u postgres psql -p "$PG_PORT" -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'")
+  if [ "$exists" != "1" ]; then
+    sudo -u postgres createdb -p "$PG_PORT" -O "$DB_USER" "$DB_NAME"
+  fi
+  ok "role and database ready"
+}
+
+# Only touch the cluster when we have to. A repeat run, and the demo rehearsal
+# in particular, must not stop for a sudo password prompt.
+if PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p "$PG_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc 'SELECT 1' >/dev/null 2>&1; then
+  log "Smoke-test role and database already present"
+  ok "reusing $DB_USER@$DB_NAME, no sudo needed"
+else
+  log "Creating the smoke-test role and database"
+  warn "this step needs sudo; later runs skip it"
+  setup_role
+fi
 
 # ---------------------------------------------------------------------------
 
