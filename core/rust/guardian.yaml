@@ -1,11 +1,26 @@
+# PG-Prism Guardian rules. First match wins.
+#
+# Guardian is a guard rail, not an authorisation boundary. It inspects only
+# Query and Parse messages under 1 KB, so padding a statement past that
+# threshold skips every rule below. Use roles and REVOKE for anything that must
+# actually hold.
+
 rules:
+  # Trusted operator connections bypass query inspection entirely.
+  #
+  # Note that this rule is only as trustworthy as the address it is given. The
+  # address comes from the PROXY header, which is why TRUSTED_PROXIES must list
+  # only load balancers you operate.
   - name: "Admin_Full_Access"
     action: "ALLOW"
-    ips: ["127.0.0.1/32"]
+    ips: ["127.0.0.1/32", "::1/128"]
     users: ["postgres"]
 
+  # Everything else. `ips` is omitted deliberately: that means "any address, of
+  # either family". Writing 0.0.0.0/0 here would look like a catch-all but is
+  # the IPv4 default route, so IPv6 clients would match no rule at all and be
+  # filtered by nothing.
   - name: "Block_Dangerous_Queries"
     action: "INSPECT"
-    ips: ["0.0.0.0/0"]
     block_queries: ["DROP", "TRUNCATE"]
     block_tables: ["secrets"]

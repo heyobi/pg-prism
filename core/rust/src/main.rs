@@ -31,11 +31,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
     })?;
 
-    // Initialize Guardian
-    let guardian = Arc::new(Guardian::new("guardian.yaml").unwrap_or_else(|| {
-        log::warn!("Guardian failed to load, proceeding with empty rules (Allow All)");
-        Guardian { rules: vec![] }
-    }));
+    // A missing rules file is fine; a malformed one is fatal. Degrading to
+    // allow-all on a typo means the operator believes a firewall is running
+    // when it is not.
+    let guardian = Arc::new(Guardian::load("guardian.yaml").map_err(|e| {
+        log::error!("{}", e);
+        e
+    })?);
 
     let ssl_enabled = env::var("SSL_ENABLED")
         .unwrap_or_else(|_| "true".to_string())
