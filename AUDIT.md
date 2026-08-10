@@ -733,6 +733,13 @@ hash from before the rewrite is dead.
 | Finding | Status | Commit | Note |
 |---|---|---|---|
 | 1 — PROXY header trusted from any peer; client IP and Guardian IP rules spoofable | **fixed** | `11377ff` | New `TRUSTED_PROXIES` allowlist checked against the real TCP peer before the header is parsed; loopback-only default; fails closed on a malformed list and refuses to start. Reproduced first: `tests/trusted_proxy.rs` originally asserted that a forged header from an arbitrary peer was honoured, and passed. |
+| 4 — UTF-8 boundary panic in the 63-byte truncation | **fixed** | `13ff293` | Truncation steps back to the nearest char boundary. Reproduced first by sweeping suffix lengths across every alignment. |
+| 5 — out-of-bounds panic on a 4-byte startup packet | **fixed** | `13ff293` | Guarded in `inject_ip_startup` and `extract_user_db`, and the caller now rejects the packet before either is reached. |
+| 8 — `accept()` error terminates the process | **fixed** | `13ff293` | Logs and retries with exponential backoff capped at 1s. |
+| 13 — unbounded allocation from a declared length | **fixed** | `13ff293` | Checked against PostgreSQL's own `MAX_STARTUP_PACKET_LENGTH` (10000) and a minimum of 8. |
+| 14 — unbounded, untimed PROXY header read | **fixed** | `13ff293` | Capped at 108 bytes, the v1 specification maximum plus one. |
+| 20 — no timeouts anywhere | **fixed** | `13ff293` | One deadline over the whole handshake, a separate one for the upstream connect. Tunable via `HANDSHAKE_TIMEOUT_SECS` / `UPSTREAM_CONNECT_TIMEOUT_SECS`; malformed values are a startup failure. |
+| 47 — dead `available_len == 0` branch | **fixed** | `13ff293` | Removed; it was itself an unguarded slice. |
 | 9 — build artifacts, binary, screenshot, AI transcript, notebook in history | **fixed** | `f3a5b91`, history rewrite | 79.45 MiB -> 50 KiB. Two commits (`e4ede12` "readmemd", `88a78e1` "testler basarili") contained nothing but removed content and were pruned as empty. |
 | 27 — "feature parity" false; Python core ignores LISTEN_HOST/LISTEN_PORT | **removed** | `862f731` | Python core retired to `contrib/python/`; the claim is gone and the divergences are documented rather than denied. |
 | 39 — Python regex YAML parser silently drops block lists | **removed** | `862f731` | Same. Documented in `contrib/python/README.md`. |
