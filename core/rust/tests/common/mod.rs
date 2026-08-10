@@ -78,17 +78,44 @@ impl StartupCapture {
     }
 }
 
-/// A fake PostgreSQL server that captures the first length-prefixed packet it
-/// receives and then holds the connection open.
+/// One post-startup message as it arrived at the backend.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub msg_type: u8,
+    pub payload: Vec<u8>,
+}
+
+impl Frame {
+    /// The payload as text with any trailing NUL removed, for Query messages.
+    pub fn text(&self) -> String {
+        let body = self.payload.strip_suffix(&[0]).unwrap_or(&self.payload);
+        String::from_utf8_lossy(body).to_string()
+    }
+}
+
+/// A fake PostgreSQL server that captures the startup packet and then every
+/// subsequent message frame the proxy forwards.
 pub struct FakeBackend {
     pub addr: SocketAddr,
     pub captured: oneshot::Receiver<StartupCapture>,
+    pub frames: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+}
+
+impl FakeBackend {
+    /// Waits for the next forwarded message, or returns None if none arrives.
+    pub async fn next_frame(&mut self, within: Duration) -> Option<Frame> {
+        tokio::time::timeout(within, self.frames.recv())
+            .await
+            .ok()
+            .flatten()
+    }
 }
 
 pub async fn spawn_fake_backend() -> FakeBackend {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = oneshot::channel();
+    let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel();
 
     tokio::spawn(async move {
         let Ok((mut sock, _)) = listener.accept().await else {
@@ -108,17 +135,40 @@ pub async fn spawn_fake_backend() -> FakeBackend {
             declared_len,
             payload,
         });
-        // Hold the socket so the proxy's forwarding tasks stay alive.
-        let mut sink = [0u8; 1024];
+
+        // Then read normal message frames: one type byte, a four-byte length
+        // that includes itself, and the payload.
         loop {
-            match sock.read(&mut sink).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
+            let mut type_byte = [0u8; 1];
+            if sock.read_exact(&mut type_byte).await.is_err() {
+                break;
+            }
+            let mut len_bytes = [0u8; 4];
+            if sock.read_exact(&mut len_bytes).await.is_err() {
+                break;
+            }
+            let body_len = u32::from_be_bytes(len_bytes).saturating_sub(4) as usize;
+            let mut body = vec![0u8; body_len];
+            if sock.read_exact(&mut body).await.is_err() {
+                break;
+            }
+            if frame_tx
+                .send(Frame {
+                    msg_type: type_byte[0],
+                    payload: body,
+                })
+                .is_err()
+            {
+                break;
             }
         }
     });
 
-    FakeBackend { addr, captured: rx }
+    FakeBackend {
+        addr,
+        captured: rx,
+        frames: frame_rx,
+    }
 }
 
 /// Accepts exactly one connection on an ephemeral port and runs it through

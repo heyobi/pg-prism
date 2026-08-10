@@ -10,8 +10,8 @@ use tokio_native_tls::TlsAcceptor;
 use crate::guardian::{Action, ConnectionContext, Guardian};
 use crate::limits::Limits;
 use crate::protocol::{
-    extract_user_db, inject_ip_startup, make_error_response, process_extended_query,
-    process_simple_query, GSSENC_REQUEST, SSL_REQUEST, STARTUP_MESSAGE,
+    extract_user_db, inject_ip_startup, make_error_response, GSSENC_REQUEST, SSL_REQUEST,
+    STARTUP_MESSAGE,
 };
 use crate::trust::{RejectionLog, TrustedProxies};
 
@@ -205,7 +205,9 @@ pub async fn handle_client(
     let client_write_half = Arc::new(tokio::sync::Mutex::new(client_write_half));
 
     // 8. Bidirectional Forwarding
-    let client_ip_clone = client_ip.clone();
+    //
+    // Statements are forwarded byte for byte. The proxy does not parse SQL, so
+    // it has no business editing it; see the note on Guardian below.
 
     // Client to Server
     let client_write_half_clone = client_write_half.clone();
@@ -221,13 +223,17 @@ pub async fn handle_client(
             let msg_len = u32::from_be_bytes(len_bytes);
             let payload_len = (msg_len.saturating_sub(4)) as usize;
 
+            // Guardian inspects small Query and Parse messages. It never
+            // rewrites them: the message is either forwarded unchanged or
+            // refused. Anything at or above the inspection size is forwarded
+            // without being looked at, which is why Guardian is a guard rail
+            // and not an authorisation boundary. See AUDIT.md finding #7.
             if (msg_type == b'Q' || msg_type == b'P') && payload_len < 1024 {
                 query_buf.resize(payload_len, 0);
                 if client_reader.read_exact(&mut query_buf).await.is_err() {
                     break;
                 }
 
-                // GUARDIAN STAGE 2: Query Check
                 if context_initialized && !Guardian::check_query(&query_buf, &guardian_context) {
                     log::warn!("Guardian: Query blocked.");
                     let err_packet =
@@ -240,37 +246,14 @@ pub async fn handle_client(
                     continue; // keep connection open
                 }
 
-                let (modified, new_payload) = if msg_type == b'Q' {
-                    process_simple_query(&query_buf, &client_ip_clone)
-                } else {
-                    process_extended_query(&query_buf, &client_ip_clone)
-                };
-
-                if modified {
-                    let new_len = (new_payload.len() + 4) as u32;
-                    if pg_write_half.write_u8(msg_type).await.is_err() {
-                        break;
-                    }
-                    if pg_write_half
-                        .write_all(&new_len.to_be_bytes())
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                    if pg_write_half.write_all(&new_payload).await.is_err() {
-                        break;
-                    }
-                } else {
-                    if pg_write_half.write_u8(msg_type).await.is_err() {
-                        break;
-                    }
-                    if pg_write_half.write_all(&len_bytes).await.is_err() {
-                        break;
-                    }
-                    if pg_write_half.write_all(&query_buf).await.is_err() {
-                        break;
-                    }
+                if pg_write_half.write_u8(msg_type).await.is_err() {
+                    break;
+                }
+                if pg_write_half.write_all(&len_bytes).await.is_err() {
+                    break;
+                }
+                if pg_write_half.write_all(&query_buf).await.is_err() {
+                    break;
                 }
             } else {
                 // Blind Forwarding
