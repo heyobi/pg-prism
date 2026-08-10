@@ -32,12 +32,22 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
   test:
-    name: tests (fake backend + real PostgreSQL)
+    name: tests (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+
+    # Two majors, deliberately. 18 is what the demo machine runs and what makes
+    # protocol 3.2 negotiation testable; 16 is closer to what the audience is
+    # actually running. The job takes under a minute, so a second dimension
+    # costs almost nothing and removes the need to write "expected to work on
+    # older versions but unverified" in the README.
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "18"]
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: prism-ci-password
