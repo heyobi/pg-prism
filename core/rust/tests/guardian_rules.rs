@@ -159,36 +159,49 @@ async fn just_under_the_threshold_is_still_inspected() {
 // Findings #17 and #40: what substring matching actually does
 // ---------------------------------------------------------------------------
 
-/// **Finding #17, now Observed.** Table matching is case-sensitive, but
-/// PostgreSQL folds unquoted identifiers, so `SECRETS` and `secrets` are the
-/// same table and only one of them is blocked.
+/// **Finding #17, fixed.** PostgreSQL folds unquoted identifiers, so `SECRETS`
+/// and `secrets` are the same table. Matching is now ASCII case-insensitive.
 #[tokio::test]
-async fn table_matching_is_case_sensitive_and_therefore_bypassable() {
+async fn table_matching_catches_a_different_case_spelling() {
     let g = inspecting_guardian(vec![], vec!["secrets"]);
     match send_query(g, "SELECT * FROM SECRETS").await {
-        Verdict::ReachedBackend(_) => {}
-        Verdict::Blocked => panic!("case-insensitive now; update finding #17"),
+        Verdict::Blocked => {}
+        Verdict::ReachedBackend(sql) => panic!("case bypass still works: {:?}", sql),
     }
 }
 
-/// **Finding #40, now Observed.** Command matching is a plain substring search,
-/// so a blocked keyword inside an unrelated identifier is a false positive.
+/// A table whose name merely starts with the blocked one is a different table
+/// and must get through.
 #[tokio::test]
-async fn command_matching_hits_unrelated_identifiers() {
+async fn a_table_with_a_shared_prefix_is_not_blocked() {
+    let g = inspecting_guardian(vec![], vec!["secrets"]);
+    match send_query(g, "SELECT * FROM secrets_backup").await {
+        Verdict::ReachedBackend(_) => {}
+        Verdict::Blocked => panic!("secrets_backup is a different table"),
+    }
+}
+
+/// **Finding #40, fixed.** A blocked keyword inside an unrelated identifier is
+/// no longer a match.
+#[tokio::test]
+async fn a_keyword_inside_an_identifier_is_not_blocked() {
     let g = inspecting_guardian(vec!["DROP"], vec![]);
     match send_query(g, "SELECT * FROM eavesdropping").await {
-        Verdict::Blocked => {}
-        Verdict::ReachedBackend(_) => panic!("token-aware now; update finding #40"),
+        Verdict::ReachedBackend(_) => {}
+        Verdict::Blocked => panic!("eavesdropping is not a DROP"),
     }
 }
 
-/// And in a comment, which no reasonable reading of the rule would block.
+/// **Documented limitation.** Guardian searches the raw statement, so a keyword
+/// in a comment still matches. Skipping comments would require recognising
+/// string literals, dollar quoting and escapes, which is a lexer, and writing
+/// one badly would produce false *negatives* instead. It errs towards blocking.
 #[tokio::test]
-async fn command_matching_hits_comments() {
+async fn a_keyword_in_a_comment_is_still_blocked() {
     let g = inspecting_guardian(vec!["DROP"], vec![]);
     match send_query(g, "SELECT 1 -- do not DROP this").await {
         Verdict::Blocked => {}
-        Verdict::ReachedBackend(_) => panic!("token-aware now; update finding #40"),
+        Verdict::ReachedBackend(_) => panic!("Guardian now parses SQL; update the docs"),
     }
 }
 

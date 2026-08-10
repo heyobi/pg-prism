@@ -1,7 +1,6 @@
 use chrono::{Local, Timelike};
 use cidr::IpCidr;
 use log::{info, warn};
-use memchr::memmem;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
@@ -242,7 +241,7 @@ impl Guardian {
                 .clone()
                 .unwrap_or_default()
                 .iter()
-                .map(|s| s.to_uppercase().as_bytes().to_vec())
+                .map(|s| s.as_bytes().to_vec())
                 .collect();
 
             let block_tables = rule
@@ -280,14 +279,9 @@ impl Guardian {
             return false;
         }
 
-        // 3. Block Queries (Command types: DELETE, DROP etc)
-        // Optimization: commands are usually at the start.
-        // But users can write "   DELETE FROM..."
-        // A simple verify is contains_ignore_case
-        // For max performance, we assume standard SQL structure or search whole string.
-
+        // 3. Blocked commands, matched as whole tokens.
         for blocked_cmd in &context.block_queries {
-            if contains_ignore_case_ascii(query, blocked_cmd) {
+            if contains_token_ignore_ascii_case(query, blocked_cmd) {
                 warn!(
                     "Guardian Blocked Query: Command '{:?}' detected.",
                     String::from_utf8_lossy(blocked_cmd)
@@ -296,9 +290,9 @@ impl Guardian {
             }
         }
 
-        // 4. Block Tables
+        // 4. Blocked tables, matched the same way.
         for blocked_table in &context.block_tables {
-            if contains_ascii(query, blocked_table) {
+            if contains_token_ignore_ascii_case(query, blocked_table) {
                 warn!(
                     "Guardian Blocked Query: Table '{:?}' access detected.",
                     String::from_utf8_lossy(blocked_table)
@@ -311,27 +305,122 @@ impl Guardian {
     }
 }
 
-// Byte-level search utils (Borrowed from main.rs, could be shared in utils.rs)
-fn contains_ignore_case_ascii(haystack: &[u8], needle: &[u8]) -> bool {
-    if haystack.len() < needle.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
+/// Can this byte be part of an SQL identifier?
+///
+/// Bytes at or above 0x80 count as identifier characters: in a UTF-8 database an
+/// identifier may contain them, and treating one as a boundary would let
+/// `secretsx` match a rule written for `secrets` when x is multi-byte.
+fn is_identifier_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
 }
 
-fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
-    if haystack.len() < needle.len() {
+/// Does `haystack` contain `needle` as a whole token, ignoring **ASCII** case?
+///
+/// Plain substring search made `DROP` match `eavesdropping` and `droplet`, and
+/// made a rule written for `secrets` miss `SECRETS` even though PostgreSQL folds
+/// both to the same table. Requiring a non-identifier byte on each side fixes
+/// both, without parsing SQL.
+///
+/// Case folding is ASCII-only. A rule written for `müşteri` will not match
+/// `MÜŞTERI`.
+///
+/// Known limitation, and the reason Guardian is a guard rail rather than an
+/// authorisation boundary: this searches the raw statement, so a keyword inside
+/// a comment or a string literal still matches. It errs towards blocking.
+fn contains_token_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
         return false;
     }
-    // Memchr is faster for single byte, but for substring we use memmem
-    memmem::find(haystack, needle).is_some()
+    for start in 0..=(haystack.len() - needle.len()) {
+        let end = start + needle.len();
+        if !haystack[start..end].eq_ignore_ascii_case(needle) {
+            continue;
+        }
+        let before_is_word = start > 0 && is_identifier_byte(haystack[start - 1]);
+        let after_is_word = end < haystack.len() && is_identifier_byte(haystack[end]);
+        if !before_is_word && !after_is_word {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- token matching, findings #17 and #40 ------------------------------
+
+    fn hit(haystack: &str, needle: &str) -> bool {
+        contains_token_ignore_ascii_case(haystack.as_bytes(), needle.as_bytes())
+    }
+
+    #[test]
+    fn a_keyword_standing_alone_matches() {
+        assert!(hit("DROP TABLE secrets", "DROP"));
+        assert!(hit("  drop table secrets", "DROP"));
+        assert!(hit("BEGIN; DROP TABLE t;", "drop"));
+        assert!(hit("DROP", "DROP"), "the whole statement is the token");
+    }
+
+    /// Finding #40: substring search blocked these.
+    #[test]
+    fn a_keyword_inside_a_longer_identifier_does_not_match() {
+        assert!(!hit("SELECT * FROM eavesdropping", "DROP"));
+        assert!(!hit("SELECT droplet FROM t", "DROP"));
+        assert!(!hit("SELECT * FROM backdrop", "DROP"));
+        assert!(!hit("SELECT * FROM drop_log", "DROP"));
+    }
+
+    /// Finding #17: PostgreSQL folds unquoted identifiers, so a rule written in
+    /// lower case has to catch the upper-case spelling of the same table.
+    #[test]
+    fn table_matching_ignores_ascii_case() {
+        assert!(hit("SELECT * FROM SECRETS", "secrets"));
+        assert!(hit("SELECT * FROM Secrets", "secrets"));
+        assert!(hit("SELECT * FROM public.secrets", "secrets"));
+    }
+
+    #[test]
+    fn a_different_table_with_a_shared_prefix_does_not_match() {
+        assert!(!hit("SELECT * FROM secrets_backup", "secrets"));
+        assert!(!hit("SELECT * FROM mysecrets", "secrets"));
+    }
+
+    /// Case folding is ASCII-only, and this is documented rather than fixed.
+    #[test]
+    fn case_folding_is_ascii_only() {
+        assert!(hit("SELECT * FROM MUSTERI", "musteri"));
+        assert!(
+            !hit("SELECT * FROM MÜŞTERI", "müşteri"),
+            "if this starts passing the folding is no longer ASCII-only and the              documented limitation is wrong"
+        );
+    }
+
+    /// Documented limitations. These assert the *wrong* answer on purpose,
+    /// because Guardian searches the raw statement and does not parse SQL.
+    #[test]
+    fn keywords_in_comments_and_literals_still_match() {
+        assert!(hit("SELECT 1 -- do not DROP this", "DROP"));
+        assert!(hit("SELECT 'DROP'", "DROP"));
+        assert!(hit("INSERT INTO log VALUES ('secrets')", "secrets"));
+    }
+
+    /// The false positive that case-insensitivity introduces: a double-quoted
+    /// identifier is case-sensitive in PostgreSQL, so "SECRETS" is a *different*
+    /// table from secrets, but Guardian blocks it anyway.
+    #[test]
+    fn a_quoted_identifier_of_different_case_is_a_different_table_but_still_matches() {
+        assert!(
+            hit("SELECT * FROM \"SECRETS\"", "secrets"),
+            "documented limitation: quoted identifiers are case-sensitive in              PostgreSQL, so this is a different table, but Guardian blocks it"
+        );
+    }
+
+    #[test]
+    fn an_empty_needle_never_matches() {
+        assert!(!hit("anything", ""));
+    }
 
     // ---- time_in_range, finding #30 ----------------------------------------
 

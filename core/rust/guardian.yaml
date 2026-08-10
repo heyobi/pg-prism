@@ -1,9 +1,28 @@
 # PG-Prism Guardian rules. First match wins.
 #
-# Guardian is a guard rail, not an authorisation boundary. It inspects only
-# Query and Parse messages under 1 KB, so padding a statement past that
-# threshold skips every rule below. Use roles and REVOKE for anything that must
-# actually hold.
+# Guardian is a guard rail, not an authorisation boundary. Use roles and REVOKE
+# for anything that must actually hold.
+#
+# How matching works
+# ------------------
+# block_queries and block_tables are matched as whole tokens against the raw
+# statement text, ignoring ASCII case. A token boundary is any byte that cannot
+# appear in an SQL identifier. So a rule for "secrets" matches SECRETS and
+# public.secrets, but not secrets_backup or mysecrets.
+#
+# Known limitations, all of them deliberate:
+#
+#   * Only Query and Parse messages under 1 KB are inspected. Padding a
+#     statement past that skips every rule here. Raising the threshold only
+#     moves the number.
+#   * Case folding is ASCII-only. A rule for "müşteri" will not match "MÜŞTERI".
+#   * A keyword inside a comment or a string literal still matches, because
+#     Guardian searches the raw statement rather than parsing SQL. It errs
+#     towards blocking.
+#   * Conversely, a double-quoted identifier is case-sensitive in PostgreSQL, so
+#     "SECRETS" is a different table from secrets. Guardian blocks it anyway.
+#   * A client can always reach a blocked table through a view, a function, or a
+#     prepared statement bound after the Parse was inspected.
 
 rules:
   # Trusted operator connections bypass query inspection entirely.

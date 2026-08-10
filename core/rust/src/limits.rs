@@ -30,9 +30,21 @@ pub struct Limits {
     /// have sent it EOF. Nothing it sends after that point can be answered, so
     /// this only bounds a client that ignores the close.
     pub drain_timeout: Duration,
+    /// How long a connection may sit idle before the kernel starts probing the
+    /// peer. This is not an idle timeout: a peer that is merely idle answers
+    /// the probe and the connection survives indefinitely, which is correct for
+    /// an application holding a connection open for hours. Only an unreachable
+    /// peer fails.
+    pub keepalive_time: Duration,
     pub max_startup_len: usize,
     pub max_proxy_header_len: usize,
 }
+
+/// Gap between probes once probing has started.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Unanswered probes before the connection is declared dead. Not configurable
+/// on Windows, where the platform fixes it.
+pub const KEEPALIVE_RETRIES: u32 = 6;
 
 impl Default for Limits {
     fn default() -> Self {
@@ -40,6 +52,7 @@ impl Default for Limits {
             handshake_timeout: Duration::from_secs(10),
             upstream_connect_timeout: Duration::from_secs(5),
             drain_timeout: Duration::from_secs(10),
+            keepalive_time: Duration::from_secs(60),
             max_startup_len: MAX_STARTUP_PACKET_LENGTH,
             max_proxy_header_len: MAX_PROXY_V1_HEADER_LEN,
         }
@@ -60,6 +73,9 @@ impl Limits {
         if let Ok(v) = std::env::var("UPSTREAM_CONNECT_TIMEOUT_SECS") {
             limits.upstream_connect_timeout =
                 Duration::from_secs(parse_secs("UPSTREAM_CONNECT_TIMEOUT_SECS", &v)?);
+        }
+        if let Ok(v) = std::env::var("TCP_KEEPALIVE_SECS") {
+            limits.keepalive_time = Duration::from_secs(parse_secs("TCP_KEEPALIVE_SECS", &v)?);
         }
         Ok(limits)
     }

@@ -11,7 +11,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 cidr = { version = "0.2", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-memchr = "2.5"
+# Already in the tree transitively via tokio; taken as a direct dependency to
+# set TCP keepalive, which tokio's TcpStream does not expose.
+socket2 = "0.5"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 
@@ -20,4 +22,5 @@ tokio-native-tls = "0.3"
 # driver actually does, rather than the way we assume one does.
 [dev-dependencies]
 tokio-postgres = "0.7"
+socket2 = "0.5"
 postgres-native-tls = "0.5"

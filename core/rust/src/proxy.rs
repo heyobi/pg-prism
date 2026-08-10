@@ -68,6 +68,43 @@ enum HandshakeOutcome {
     Cancel { payload: Vec<u8>, client_ip: String },
 }
 
+/// Applies TCP_NODELAY and TCP keepalive.
+///
+/// Keepalive is the answer to a specific leak, measured rather than guessed: if
+/// a client half-closes its write side and the peer at the other end then
+/// becomes unreachable without closing — a firewall dropping the flow, a
+/// middlebox losing state — the read blocks forever, and with keepalive off by
+/// default the kernel never gives up either. A task and two descriptors are
+/// held indefinitely.
+///
+/// A general idle timeout would be the wrong instrument: an application
+/// legitimately holds a connection open and idle for hours. Keepalive
+/// distinguishes idle from unreachable, which is exactly the distinction
+/// needed. An idle-but-alive peer answers the probe.
+///
+/// It deliberately does not help with a peer that is reachable but hung: the
+/// kernel answers probes even when the process is stuck, and that case is
+/// indistinguishable from a slow query.
+///
+/// **Not covered by tests end to end.** Proving it needs a firewall that drops
+/// packets without sending RST, which CI cannot do. The test asserts the socket
+/// option is set, which covers this code path but not the kernel behaviour.
+pub fn configure_socket(sock: &TcpStream, limits: &Limits) {
+    if let Err(e) = sock.set_nodelay(true) {
+        log::warn!("Failed to set TCP_NODELAY: {}", e);
+    }
+
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(limits.keepalive_time)
+        .with_interval(crate::limits::KEEPALIVE_INTERVAL);
+    #[cfg(not(windows))]
+    let keepalive = keepalive.with_retries(crate::limits::KEEPALIVE_RETRIES);
+
+    if let Err(e) = socket2::SockRef::from(sock).set_tcp_keepalive(&keepalive) {
+        log::warn!("Failed to enable TCP keepalive: {}", e);
+    }
+}
+
 /// Opens the upstream connection under the configured deadline.
 async fn connect_upstream(cfg: &ProxyConfig) -> Result<TcpStream, String> {
     match timeout(
@@ -82,9 +119,7 @@ async fn connect_upstream(cfg: &ProxyConfig) -> Result<TcpStream, String> {
         )),
         Ok(Err(e)) => Err(format!("upstream {} unreachable: {}", cfg.pg_addr, e)),
         Ok(Ok(sock)) => {
-            if let Err(e) = sock.set_nodelay(true) {
-                log::warn!("Failed to set TCP_NODELAY on pg socket: {}", e);
-            }
+            configure_socket(&sock, &cfg.limits);
             Ok(sock)
         }
     }
@@ -103,6 +138,7 @@ pub async fn handle_client(
     // connection from elsewhere is a misconfiguration or an attempt to forge a
     // source address.
     let peer_ip = client_socket.peer_addr()?.ip();
+    configure_socket(&client_socket, &cfg.limits);
     if !cfg.trusted.is_trusted(peer_ip) {
         if let Some(suppressed) = UNTRUSTED_PEER_LOG.should_log() {
             if suppressed > 0 {

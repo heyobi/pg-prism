@@ -187,6 +187,32 @@ benchmark slide has to state both, so keep them aligned and known.
 
 ## 4. Making the client-address gap visible
 
+### Do not demo as the `postgres` user
+
+`guardian.yaml` ships with an `Admin_Full_Access` rule that gives loopback plus
+the `postgres` user the `ALLOW` action, which **bypasses query inspection
+entirely**. On the native path everything is loopback, so connecting as
+`postgres` matches that rule and the Guardian part of the demo silently does
+nothing: the blocked statement simply succeeds, and it looks like the feature is
+broken rather than deliberately bypassed.
+
+Use a separate unprivileged role for every demo connection:
+
+```bash
+sudo -u postgres psql -c "CREATE ROLE demo_app LOGIN PASSWORD 'demo';"
+sudo -u postgres psql -c "CREATE DATABASE demo OWNER demo_app;"
+```
+
+`scripts/smoke-native.sh` already creates its own `prism_smoke` role for the
+same reason. If you edit either the script or the demo to use `postgres`, the
+Guardian beat stops proving anything.
+
+To see the ALLOW path working *on purpose*, connect as `postgres` and show the
+same blocked statement succeeding. That is a better demo than hiding the rule:
+it shows the rule engine making a decision rather than doing nothing.
+
+### Making the client-address gap visible
+
 On a single host every address is `127.0.0.1`, so a screenshot of
 `pg_stat_activity` shows the same value in `client_addr` and in the injected
 suffix, and demonstrates nothing. Three ways to create a real gap, cheapest

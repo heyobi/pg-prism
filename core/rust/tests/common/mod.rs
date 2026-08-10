@@ -294,6 +294,7 @@ pub fn test_limits() -> Limits {
         handshake_timeout: Duration::from_millis(750),
         upstream_connect_timeout: Duration::from_millis(750),
         drain_timeout: Duration::from_millis(750),
+        keepalive_time: Duration::from_secs(60),
         ..Limits::default()
     }
 }

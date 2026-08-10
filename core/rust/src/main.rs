@@ -103,10 +103,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         };
 
-        if let Err(e) = client_socket.set_nodelay(true) {
-            log::warn!("Failed to set TCP_NODELAY on client socket: {}", e);
-        }
-
         let cfg = cfg.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(client_socket, cfg).await {

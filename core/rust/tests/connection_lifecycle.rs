@@ -284,3 +284,35 @@ async fn a_half_closed_client_still_receives_pending_responses() {
         "the response was truncated by the half-close"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TCP keepalive
+// ---------------------------------------------------------------------------
+
+/// Keepalive closes a leak that was measured: a half-closed client plus a peer
+/// that becomes unreachable without closing leaves a task and two descriptors
+/// held indefinitely, because the read never returns and the kernel never gives
+/// up with keepalive off.
+///
+/// This asserts only that the option reaches the socket. The end-to-end
+/// behaviour needs a firewall that drops packets without sending RST, which CI
+/// cannot do, so that part is documented rather than tested.
+#[tokio::test]
+async fn keepalive_is_enabled_on_accepted_sockets() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let accepted = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        pg_prism_rust::proxy::configure_socket(&sock, &test_limits());
+        let enabled = socket2::SockRef::from(&sock).keepalive().unwrap();
+        let nodelay = sock.nodelay().unwrap();
+        (enabled, nodelay)
+    });
+
+    let _client = TcpStream::connect(addr).await.unwrap();
+    let (keepalive, nodelay) = accepted.await.unwrap();
+
+    assert!(keepalive, "TCP keepalive was not enabled on the socket");
+    assert!(nodelay, "TCP_NODELAY was not set");
+}
